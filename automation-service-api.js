@@ -63,7 +63,7 @@ class AutomationService {
       console.log('🚀 Launching browser...');
       
       const launchOptions = {
-        headless: true, // Must be true for production/Render
+        headless: true,
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
@@ -73,9 +73,8 @@ class AutomationService {
         ]
       };
 
-      // Puppeteer includes Chromium automatically
-console.log('🌐 Using bundled Chromium from Puppeteer');
-      }
+      // Puppeteer includes Chromium automatically - no executablePath needed
+      console.log('🌐 Using bundled Chromium from Puppeteer');
 
       // Add proxy if configured
       if (proxyConfig) {
