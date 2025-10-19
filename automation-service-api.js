@@ -14,6 +14,24 @@ const { createClient } = require('@supabase/supabase-js');
 // Load environment variables
 require('dotenv').config();
 
+// Debug: Log environment variables (first 20 chars only for security)
+console.log('🔍 Checking Supabase credentials...');
+console.log('   SUPABASE_URL:', process.env.SUPABASE_URL ? `${process.env.SUPABASE_URL.substring(0, 30)}...` : '❌ NOT SET');
+console.log('   SUPABASE_ANON_KEY:', process.env.SUPABASE_ANON_KEY ? `${process.env.SUPABASE_ANON_KEY.substring(0, 20)}...` : '❌ NOT SET');
+
+// Validate environment variables
+if (!process.env.SUPABASE_URL || !process.env.SUPABASE_ANON_KEY) {
+  console.error('');
+  console.error('❌ FATAL ERROR: Missing Supabase credentials!');
+  console.error('');
+  console.error('Please set these environment variables on Render:');
+  console.error('  SUPABASE_URL = https://krdanhnsnxurinwmznvz.supabase.co');
+  console.error('  SUPABASE_ANON_KEY = [your anon key from Supabase]');
+  console.error('');
+  console.error('Get these from: https://supabase.com/dashboard/project/krdanhnsnxurinwmznvz/settings/api');
+  console.error('');
+}
+
 // Supabase client setup
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -63,7 +81,7 @@ class AutomationService {
       console.log('🚀 Launching browser...');
       
       const launchOptions = {
-        headless: true,
+        headless: true, // Must be true for production/Render
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
