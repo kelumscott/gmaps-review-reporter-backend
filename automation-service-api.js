@@ -8,7 +8,7 @@
  * programmatically by the Express.js server.
  */
 
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-core');
 const { createClient } = require('@supabase/supabase-js');
 
 // Load environment variables
