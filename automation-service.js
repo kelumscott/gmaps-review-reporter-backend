@@ -11,7 +11,7 @@
  * 4. Run: node automation-service.js
  */
 
-const puppeteer = require('puppeteer-core');
+const puppeteer = require('puppeteer');
 const { createClient } = require('@supabase/supabase-js');
 
 // Load environment variables
