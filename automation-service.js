@@ -42,13 +42,29 @@ class ReviewReporterBot {
       console.log('🚀 Launching browser...');
       
       const launchOptions = {
-        headless: false, // Set to true for production, or use 'new' for new headless mode
+        headless: true, // Must be true for production/Render
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
-          '--disable-blink-features=AutomationControlled'
+          '--disable-blink-features=AutomationControlled',
+          '--disable-dev-shm-usage',
+          '--disable-gpu'
         ]
       };
+
+      // For Render/production: use system Chrome if available
+      if (process.env.NODE_ENV === 'production' || process.env.RENDER) {
+        // Try common Chrome paths on Linux servers
+        const chromePaths = [
+          '/usr/bin/google-chrome',
+          '/usr/bin/chromium-browser',
+          '/usr/bin/chromium'
+        ];
+        
+        // Check if any Chrome exists (we'll let Puppeteer handle the actual check)
+        launchOptions.executablePath = chromePaths[0]; // Default to first path
+        console.log('🌐 Using system Chrome for production');
+      }
 
       // Add proxy if configured
       if (proxyConfig) {
