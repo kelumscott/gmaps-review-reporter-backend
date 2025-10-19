@@ -73,18 +73,8 @@ class AutomationService {
         ]
       };
 
-      // For Render/production: use system Chrome if available
-      if (process.env.NODE_ENV === 'production' || process.env.RENDER) {
-        // Try common Chrome paths on Linux servers
-        const chromePaths = [
-          '/usr/bin/google-chrome',
-          '/usr/bin/chromium-browser',
-          '/usr/bin/chromium'
-        ];
-        
-        // Check if any Chrome exists (we'll let Puppeteer handle the actual check)
-        launchOptions.executablePath = chromePaths[0]; // Default to first path
-        console.log('🌐 Using system Chrome for production');
+      // Puppeteer includes Chromium automatically
+console.log('🌐 Using bundled Chromium from Puppeteer');
       }
 
       // Add proxy if configured
@@ -117,7 +107,7 @@ class AutomationService {
    */
   async getProxyConfig() {
     const { data, error } = await supabase
-      .from('proxy_config')
+      .from('proxy_configs')
       .select('*')
       .eq('is_active', true)
       .single();
