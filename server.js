@@ -13,6 +13,34 @@
 
 const express = require('express');
 const cors = require('cors');
+const { createClient } = require('@supabase/supabase-js');
+require('dotenv').config();
+
+// Debug: Check environment variables on server startup
+console.log('');
+console.log('╔════════════════════════════════════════════════════════════╗');
+console.log('║   🔍 Server Environment Check                              ║');
+console.log('╚════════════════════════════════════════════════════════════╝');
+console.log('');
+console.log('Environment variables:');
+console.log('  PORT:', process.env.PORT || '3001 (default)');
+console.log('  SUPABASE_URL:', process.env.SUPABASE_URL ? '✅ SET' : '❌ NOT SET');
+console.log('  SUPABASE_ANON_KEY:', process.env.SUPABASE_ANON_KEY ? '✅ SET' : '❌ NOT SET');
+console.log('');
+
+if (!process.env.SUPABASE_URL || !process.env.SUPABASE_ANON_KEY) {
+  console.error('⚠️  WARNING: Missing Supabase credentials!');
+  console.error('   The automation will not work without these.');
+  console.error('   Please set SUPABASE_URL and SUPABASE_ANON_KEY in Render environment variables.');
+  console.error('');
+}
+
+// Initialize Supabase client for testing
+const supabase = createClient(
+  process.env.SUPABASE_URL || '',
+  process.env.SUPABASE_ANON_KEY || ''
+);
+
 const { AutomationService } = require('./automation-service-api');
 
 const app = express();
@@ -32,6 +60,58 @@ app.get('/health', (req, res) => {
     service: 'Google Maps Review Reporter API',
     timestamp: new Date().toISOString()
   });
+});
+
+// Debug endpoint to check environment variables
+app.get('/debug/env', (req, res) => {
+  res.json({
+    hasSupabaseUrl: !!process.env.SUPABASE_URL,
+    hasSupabaseKey: !!process.env.SUPABASE_ANON_KEY,
+    supabaseUrlPrefix: process.env.SUPABASE_URL ? process.env.SUPABASE_URL.substring(0, 30) + '...' : 'NOT SET',
+    supabaseKeyPrefix: process.env.SUPABASE_ANON_KEY ? process.env.SUPABASE_ANON_KEY.substring(0, 20) + '...' : 'NOT SET',
+    nodeEnv: process.env.NODE_ENV || 'not set',
+    port: process.env.PORT || '3001 (default)'
+  });
+});
+
+// Debug endpoint to test Supabase connection
+app.get('/debug/supabase', async (req, res) => {
+  try {
+    // Test 1: Check if we can query the reviews table
+    const { data: reviews, error: reviewsError } = await supabase
+      .from('reviews')
+      .select('id, status')
+      .limit(1);
+    
+    // Test 2: Check if we can query the gmail_accounts table
+    const { data: accounts, error: accountsError } = await supabase
+      .from('gmail_accounts')
+      .select('id, email')
+      .limit(1);
+    
+    res.json({
+      success: !reviewsError && !accountsError,
+      reviewsTest: {
+        success: !reviewsError,
+        error: reviewsError ? reviewsError.message : null,
+        count: reviews ? reviews.length : 0
+      },
+      accountsTest: {
+        success: !accountsError,
+        error: accountsError ? accountsError.message : null,
+        count: accounts ? accounts.length : 0
+      },
+      message: !reviewsError && !accountsError 
+        ? '✅ Supabase connection working!' 
+        : '❌ Supabase connection failed'
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      message: '❌ Unexpected error testing Supabase'
+    });
+  }
 });
 
 // Get automation status
