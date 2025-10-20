@@ -87,12 +87,22 @@ class AutomationService {
           '--disable-setuid-sandbox',
           '--disable-blink-features=AutomationControlled',
           '--disable-dev-shm-usage',
-          '--disable-gpu'
+          '--disable-gpu',
+          '--disable-software-rasterizer',
+          '--disable-extensions',
+          '--disable-background-networking',
+          '--disable-default-apps',
+          '--disable-sync',
+          '--metrics-recording-only',
+          '--mute-audio',
+          '--no-first-run',
+          '--safebrowsing-disable-auto-update',
+          '--single-process' // Important for limited memory on Render free tier
         ]
       };
 
       // Puppeteer includes Chromium automatically - no executablePath needed
-      console.log('🌐 Using bundled Chromium from Puppeteer');
+      console.log('🌐 Using bundled Chromium from Puppeteer (Render-optimized)');
 
       // Add proxy if configured
       if (proxyConfig) {
