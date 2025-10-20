@@ -98,11 +98,13 @@ class AutomationService {
           '--no-first-run',
           '--safebrowsing-disable-auto-update',
           '--single-process' // Important for limited memory on Render free tier
-        ]
+        ],
+        // Explicitly use bundled Chromium (fixes Render deployment)
+        executablePath: puppeteer.executablePath()
       };
 
-      // Puppeteer includes Chromium automatically - no executablePath needed
-      console.log('🌐 Using bundled Chromium from Puppeteer (Render-optimized)');
+      console.log('🌐 Using bundled Chromium from Puppeteer');
+      console.log(`   Executable: ${puppeteer.executablePath()}`);
 
       // Add proxy if configured
       if (proxyConfig) {
