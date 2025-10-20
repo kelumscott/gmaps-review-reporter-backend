@@ -137,7 +137,7 @@ class AutomationService {
       .from('proxy_configs')
       .select('*')
       .eq('is_active', true)
-      .single();
+      .limit(1).maybeSingle()
 
     if (error) {
       console.error('❌ Error fetching proxy config:', error.message);
