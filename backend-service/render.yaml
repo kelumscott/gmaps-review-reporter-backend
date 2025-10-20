@@ -1,0 +1,19 @@
+yaml
+services:
+type: web
+    name: gmaps-reporter-api
+    env: node
+    region: oregon
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+key: SUPABASE_URL
+        sync: false
+key: SUPABASE_ANON_KEY
+        sync: false
+key: NODE_ENV
+        value: production
+    # Install Chrome and dependencies for Puppeteer
+    buildpacks:
+https://github.com/jontewks/puppeteer-heroku-buildpack
