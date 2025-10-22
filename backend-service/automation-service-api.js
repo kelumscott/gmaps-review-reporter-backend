@@ -103,7 +103,7 @@ class AutomationService {
         executablePath: puppeteer.executablePath()
       };
 
-      console.log('🌐 Using bundled Chromium from Puppeteer');
+      console.log('🌐 DEPLOYMENT TEST #2025 - Using bundled Chromium');
       console.log(`   Executable: ${puppeteer.executablePath()}`);
 
       // Add proxy if configured
