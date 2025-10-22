@@ -8,8 +8,9 @@
  * programmatically by the Express.js server.
  */
 
-const puppeteer = require('puppeteer');
-const { createClient } = require('@supabase/supabase-js');
+const puppeteer = require('puppeteer-core');
+   const chromium = require('@sparticuz/chromium');
+   const { createClient } = require('@supabase/supabase-js');
 
 // Load environment variables
 require('dotenv').config();
@@ -81,8 +82,9 @@ class AutomationService {
       console.log('🚀 Launching browser...');
       
       const launchOptions = {
-        headless: true, // Must be true for production/Render
+        headless: chromium.headless, // Must be true for production/Render
         args: [
+     ...chromium.args,
           '--no-sandbox',
           '--disable-setuid-sandbox',
           '--disable-blink-features=AutomationControlled',
@@ -100,11 +102,11 @@ class AutomationService {
           '--single-process' // Important for limited memory on Render free tier
         ],
         // Explicitly use bundled Chromium (fixes Render deployment)
-        executablePath: puppeteer.executablePath()
+        executablePath: await chromium.executablePath()
       };
 
-      console.log('🌐 DEPLOYMENT TEST #2025 - Using bundled Chromium');
-      console.log(`   Executable: ${puppeteer.executablePath()}`);
+      console.log('🌐 Using @sparticuz/chromium for Render');
+   console.log(`   Executable: ${await chromium.executablePath()}`);
 
       // Add proxy if configured
       if (proxyConfig) {
