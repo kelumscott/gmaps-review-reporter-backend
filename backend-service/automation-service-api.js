@@ -388,21 +388,63 @@ class AutomationService {
     try {
       console.log(`🗺️ Opening review link: ${reviewLink}`);
       
-      await page.goto(reviewLink, {
-        waitUntil: 'networkidle2',
-        timeout: 30000
-      });
+      // Try multiple navigation strategies with retries
+      let navigationSuccess = false;
+      const strategies = [
+        { waitUntil: 'domcontentloaded', timeout: 60000, name: 'DOM Content Loaded' },
+        { waitUntil: 'load', timeout: 60000, name: 'Page Load' },
+        { waitUntil: 'networkidle2', timeout: 90000, name: 'Network Idle' }
+      ];
+      
+      for (const strategy of strategies) {
+        try {
+          console.log(`   🔄 Trying navigation strategy: ${strategy.name} (timeout: ${strategy.timeout}ms)`);
+          await page.goto(reviewLink, {
+            waitUntil: strategy.waitUntil,
+            timeout: strategy.timeout
+          });
+          console.log(`   ✅ Navigation successful with: ${strategy.name}`);
+          navigationSuccess = true;
+          break;
+        } catch (navError) {
+          console.log(`   ⚠️ ${strategy.name} failed: ${navError.message}`);
+          if (strategy === strategies[strategies.length - 1]) {
+            throw navError; // Throw only if all strategies failed
+          }
+          // Continue to next strategy
+        }
+      }
 
-      await this.delay(3000);
+      if (!navigationSuccess) {
+        throw new Error('All navigation strategies failed');
+      }
+
+      console.log('   ⏳ Waiting for page to stabilize...');
+      await this.delay(5000); // Give page more time to fully render
+
+      // Debug: Check what's on the page
+      console.log('🔍 Checking page content...');
+      const pageInfo = await page.evaluate(() => {
+        return {
+          url: window.location.href,
+          title: document.title,
+          hasButtons: document.querySelectorAll('button').length,
+          hasAriaLabels: document.querySelectorAll('[aria-label]').length
+        };
+      });
+      console.log('📄 Page info:', JSON.stringify(pageInfo, null, 2));
 
       // Look for the three-dot menu button
+      console.log('🔍 Searching for three-dot menu button...');
       const menuSelectors = [
         'button[aria-label*="More"]',
         'button[aria-label*="Menu"]',
         'button[aria-label*="More options"]',
         'button[data-item-id*="overflow"]',
         '[role="button"][aria-haspopup="menu"]',
-        'button[jsaction*="menu"]'
+        'button[jsaction*="menu"]',
+        'button[data-tooltip*="More"]',
+        'button.VfPpkd-Bz112c-LgbsSe' // Google's material design button class
       ];
 
       let menuButton = null;
@@ -419,6 +461,28 @@ class AutomationService {
       }
 
       if (!menuButton) {
+        // Debug: Show all buttons on the page
+        console.log('⚠️ Could not find menu button. Debugging all buttons on page...');
+        const allButtons = await page.evaluate(() => {
+          const buttons = Array.from(document.querySelectorAll('button'));
+          return buttons.slice(0, 20).map((btn, i) => ({
+            index: i,
+            text: btn.innerText?.substring(0, 50) || '',
+            ariaLabel: btn.getAttribute('aria-label') || '',
+            className: btn.className?.substring(0, 100) || '',
+            dataTooltip: btn.getAttribute('data-tooltip') || ''
+          }));
+        });
+        console.log('🔘 First 20 buttons on page:', JSON.stringify(allButtons, null, 2));
+        
+        // Take screenshot for debugging
+        try {
+          await page.screenshot({ path: '/tmp/page-debug.png', fullPage: false });
+          console.log('📸 Screenshot saved to /tmp/page-debug.png');
+        } catch (screenshotError) {
+          console.log('⚠️ Could not save screenshot');
+        }
+        
         throw new Error('Could not find three-dot menu button');
       }
 
