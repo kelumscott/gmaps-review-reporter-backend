@@ -82,9 +82,9 @@ class AutomationService {
       console.log('🚀 Launching browser...');
       
       const launchOptions = {
-        headless: chromium.headless, // Must be true for production/Render
+        headless: chromium.headless,
         args: [
-     ...chromium.args,
+          ...chromium.args,
           '--no-sandbox',
           '--disable-setuid-sandbox',
           '--disable-blink-features=AutomationControlled',
@@ -101,12 +101,12 @@ class AutomationService {
           '--safebrowsing-disable-auto-update',
           '--single-process' // Important for limited memory on Render free tier
         ],
-        // Explicitly use bundled Chromium (fixes Render deployment)
+        // Use @sparticuz/chromium for Render deployment
         executablePath: await chromium.executablePath()
       };
 
       console.log('🌐 Using @sparticuz/chromium for Render');
-   console.log(`   Executable: ${await chromium.executablePath()}`);
+      console.log(`   Executable: ${await chromium.executablePath()}`);
 
       // Add proxy if configured
       if (proxyConfig) {
