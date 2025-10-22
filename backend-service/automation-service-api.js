@@ -8,9 +8,15 @@
  * programmatically by the Express.js server.
  */
 
-const puppeteer = require('puppeteer-core');
+// Use puppeteer-extra with stealth plugin for better bot detection evasion
+const puppeteerExtra = require('puppeteer-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const chromium = require('@sparticuz/chromium');
 const { createClient } = require('@supabase/supabase-js');
+
+// Enable stealth plugin
+puppeteerExtra.use(StealthPlugin());
+console.log('🎭 Stealth plugin enabled - enhancing bot detection evasion');
 
 // Load environment variables
 require('dotenv').config();
@@ -116,8 +122,8 @@ class AutomationService {
         console.log(`   Location: ${proxyConfig.location}, Session: ${proxyConfig.session_type}`);
       }
 
-      this.browser = await puppeteer.launch(launchOptions);
-      console.log('✅ Browser launched successfully');
+      this.browser = await puppeteerExtra.launch(launchOptions);
+      console.log('✅ Browser launched successfully with stealth mode');
     }
     return this.browser;
   }
@@ -257,6 +263,28 @@ class AutomationService {
   async loginToGmail(page, email, password) {
     try {
       console.log(`📧 Logging into Gmail: ${email}`);
+      console.log('   🎭 Applying extra stealth measures...');
+      
+      // Extra stealth: Set realistic viewport
+      await page.setViewport({
+        width: 1920,
+        height: 1080,
+        deviceScaleFactor: 1,
+      });
+      
+      // Extra stealth: Set realistic user agent
+      await page.setUserAgent(
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
+      );
+      
+      // Extra stealth: Set additional headers
+      await page.setExtraHTTPHeaders({
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+      });
+      
+      console.log('   ✅ Stealth measures applied');
+      
       await page.goto('https://accounts.google.com/', {
         waitUntil: 'networkidle2',
         timeout: 30000
