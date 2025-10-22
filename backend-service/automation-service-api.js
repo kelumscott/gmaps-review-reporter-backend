@@ -399,8 +399,10 @@ class AutomationService {
       const menuSelectors = [
         'button[aria-label*="More"]',
         'button[aria-label*="Menu"]',
+        'button[aria-label*="More options"]',
         'button[data-item-id*="overflow"]',
-        '[role="button"][aria-haspopup="menu"]'
+        '[role="button"][aria-haspopup="menu"]',
+        'button[jsaction*="menu"]'
       ];
 
       let menuButton = null;
@@ -424,19 +426,48 @@ class AutomationService {
       await menuButton.click();
       await this.delay(2000);
 
-      // Look for "Report review" or similar option
-      const reportSelectors = [
-        'text/Report review',
-        'text/Flag as inappropriate',
-        '[role="menuitem"]:has-text("Report")',
+      // Debug: Log all menu items to see what's available
+      console.log('🔍 Debugging menu items...');
+      try {
+        const menuItems = await page.evaluate(() => {
+          const items = Array.from(document.querySelectorAll('[role="menuitem"], [role="option"], .VfPpkd-StrnGf-rymPhb, [data-index]'));
+          return items.map((item, index) => ({
+            index,
+            text: item.innerText || item.textContent,
+            ariaLabel: item.getAttribute('aria-label'),
+            className: item.className,
+            tagName: item.tagName
+          }));
+        });
+        console.log('📋 Available menu items:', JSON.stringify(menuItems, null, 2));
+      } catch (debugError) {
+        console.log('⚠️ Could not debug menu items:', debugError.message);
+      }
+
+      // Look for "Report review" or similar option using XPath and text content
+      console.log('🔍 Searching for report option...');
+      
+      let reportOption = null;
+      
+      // Try XPath first (most reliable for text matching)
+      const xpathSelectors = [
+        "//div[contains(text(), 'Report review')]",
+        "//div[contains(text(), 'Flag as inappropriate')]",
+        "//div[contains(text(), 'Report')]",
+        "//span[contains(text(), 'Report review')]",
+        "//span[contains(text(), 'Flag as inappropriate')]",
+        "//span[contains(text(), 'Report')]",
+        "//*[@role='menuitem' and contains(., 'Report')]",
+        "//*[@role='option' and contains(., 'Report')]"
       ];
 
-      let reportOption = null;
-      for (const selector of reportSelectors) {
+      for (const xpath of xpathSelectors) {
         try {
-          reportOption = await page.$(selector);
-          if (reportOption) {
-            console.log(`✅ Found report option with selector: ${selector}`);
+          const elements = await page.$x(xpath);
+          if (elements.length > 0) {
+            // Find the clickable parent
+            reportOption = elements[0];
+            console.log(`✅ Found report option with XPath: ${xpath}`);
             break;
           }
         } catch (e) {
@@ -444,27 +475,67 @@ class AutomationService {
         }
       }
 
+      // If XPath didn't work, try CSS selectors with text matching
       if (!reportOption) {
+        console.log('🔍 XPath failed, trying CSS selectors with text matching...');
+        reportOption = await page.evaluateHandle(() => {
+          const allElements = Array.from(document.querySelectorAll('[role="menuitem"], [role="option"], div, span'));
+          for (const el of allElements) {
+            const text = (el.innerText || el.textContent || '').toLowerCase();
+            if (text.includes('report') || text.includes('flag')) {
+              // Return the element or its clickable parent
+              let clickable = el;
+              while (clickable && !clickable.onclick && clickable.tagName !== 'BUTTON' && clickable !== document.body) {
+                clickable = clickable.parentElement;
+              }
+              return clickable || el;
+            }
+          }
+          return null;
+        });
+        
+        const isValid = await reportOption.evaluate(el => el !== null);
+        if (isValid) {
+          console.log('✅ Found report option via text matching');
+        } else {
+          reportOption = null;
+        }
+      }
+
+      if (!reportOption) {
+        // Take a screenshot for debugging
+        try {
+          await page.screenshot({ path: '/tmp/menu-debug.png', fullPage: true });
+          console.log('📸 Screenshot saved to /tmp/menu-debug.png');
+        } catch (screenshotError) {
+          console.log('⚠️ Could not save screenshot:', screenshotError.message);
+        }
         throw new Error('Could not find report option in menu');
       }
 
       // Click report option
+      console.log('🖱️ Clicking report option...');
       await reportOption.click();
       await this.delay(2000);
 
       // Select report reason if available
       if (reportReason) {
-        const reasonSelectors = [
-          `text/${reportReason}`,
-          `[role="radio"]:has-text("${reportReason}")`,
-          `label:has-text("${reportReason}")`
+        console.log(`🎯 Looking for report reason: ${reportReason}`);
+        const reasonXPaths = [
+          `//*[contains(text(), '${reportReason}')]`,
+          `//label[contains(text(), '${reportReason}')]`,
+          `//span[contains(text(), '${reportReason}')]`
         ];
 
         let reasonOption = null;
-        for (const selector of reasonSelectors) {
+        for (const xpath of reasonXPaths) {
           try {
-            reasonOption = await page.$(selector);
-            if (reasonOption) break;
+            const elements = await page.$x(xpath);
+            if (elements.length > 0) {
+              reasonOption = elements[0];
+              console.log(`✅ Found reason option: ${reportReason}`);
+              break;
+            }
           } catch (e) {
             continue;
           }
@@ -473,33 +544,52 @@ class AutomationService {
         if (reasonOption) {
           await reasonOption.click();
           await this.delay(1000);
+        } else {
+          console.log('⚠️ Could not find specific reason, will submit with default');
         }
       }
 
       // Submit the report
-      const submitSelectors = [
-        'button[type="submit"]',
-        'text/Submit',
-        'text/Report',
-        'button:has-text("Submit")',
-        'button:has-text("Report")'
+      console.log('🔍 Looking for submit button...');
+      const submitXPaths = [
+        "//button[contains(text(), 'Submit')]",
+        "//button[contains(text(), 'Report')]",
+        "//button[contains(text(), 'Send')]",
+        "//span[contains(text(), 'Submit')]",
+        "//span[contains(text(), 'Report')]"
       ];
 
-      for (const selector of submitSelectors) {
+      let submitted = false;
+      for (const xpath of submitXPaths) {
         try {
-          const submitButton = await page.$(selector);
-          if (submitButton) {
-            await submitButton.click();
+          const elements = await page.$x(xpath);
+          if (elements.length > 0) {
+            await elements[0].click();
             console.log('✅ Report submitted successfully');
             await this.delay(3000);
-            return true;
+            submitted = true;
+            break;
           }
         } catch (e) {
           continue;
         }
       }
 
-      console.log('⚠️ Could not find submit button, report may still have succeeded');
+      if (!submitted) {
+        // Try CSS selectors as backup
+        const submitButton = await page.$('button[type="submit"]');
+        if (submitButton) {
+          await submitButton.click();
+          console.log('✅ Report submitted via submit button');
+          await this.delay(3000);
+          submitted = true;
+        }
+      }
+
+      if (!submitted) {
+        console.log('⚠️ Could not find submit button, report may still have succeeded');
+      }
+
       return true;
 
     } catch (error) {
