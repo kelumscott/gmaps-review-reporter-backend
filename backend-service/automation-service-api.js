@@ -488,7 +488,8 @@ class AutomationService {
 
       // Click the menu button
       await menuButton.click();
-      await this.delay(2000);
+      console.log('   ⏳ Waiting for menu to open...');
+      await this.delay(4000); // Increased delay for menu to fully render
 
       // Debug: Log all menu items to see what's available
       console.log('🔍 Debugging menu items...');
@@ -580,54 +581,194 @@ class AutomationService {
       // Click report option
       console.log('🖱️ Clicking report option...');
       await reportOption.click();
-      await this.delay(2000);
+      console.log('   ⏳ Waiting for report dialog to open...');
+      await this.delay(4000); // Increased delay for report dialog to fully load
+
+      // Debug: Show all available report reasons
+      console.log('🔍 Debugging available report reasons...');
+      try {
+        const availableReasons = await page.evaluate(() => {
+          const reasons = [];
+          
+          // Look for radio buttons, labels, and clickable elements
+          const elements = Array.from(document.querySelectorAll([
+            'label',
+            '[role="radio"]',
+            '[role="option"]',
+            '.VfPpkd-StrnGf-rymPhb',
+            '[data-index]',
+            'input[type="radio"] + *',
+            'div[jsaction*="click"]'
+          ].join(', ')));
+          
+          elements.forEach((el, i) => {
+            const text = (el.innerText || el.textContent || '').trim();
+            if (text && text.length > 0 && text.length < 200) {
+              reasons.push({
+                index: i,
+                text: text,
+                tagName: el.tagName,
+                role: el.getAttribute('role') || '',
+                ariaLabel: el.getAttribute('aria-label') || '',
+                className: el.className?.substring(0, 50) || ''
+              });
+            }
+          });
+          
+          return reasons;
+        });
+        console.log('📋 Available report reasons:', JSON.stringify(availableReasons, null, 2));
+      } catch (debugError) {
+        console.log('⚠️ Could not debug report reasons:', debugError.message);
+      }
 
       // Select report reason if available
       if (reportReason) {
-        console.log(`🎯 Looking for report reason: ${reportReason}`);
-        const reasonXPaths = [
-          `//*[contains(text(), '${reportReason}')]`,
-          `//label[contains(text(), '${reportReason}')]`,
-          `//span[contains(text(), '${reportReason}')]`
-        ];
-
-        let reasonOption = null;
-        for (const xpath of reasonXPaths) {
+        console.log(`🎯 Looking for report reason: "${reportReason}"`);
+        
+        // Try to find and click the reason option
+        let reasonClicked = false;
+        
+        // Strategy 1: Find by exact text match (case-sensitive)
+        console.log('   🔍 Strategy 1: Exact text match');
+        const exactTextResult = await page.evaluate((reason) => {
+          const allElements = Array.from(document.querySelectorAll('*'));
+          for (const el of allElements) {
+            const text = (el.innerText || el.textContent || '').trim();
+            if (text === reason) {
+              // Find clickable parent (label, radio button, or clickable div)
+              let clickable = el;
+              let depth = 0;
+              while (clickable && depth < 5) {
+                if (
+                  clickable.tagName === 'LABEL' ||
+                  clickable.getAttribute('role') === 'radio' ||
+                  clickable.getAttribute('role') === 'option' ||
+                  clickable.onclick ||
+                  clickable.getAttribute('jsaction')
+                ) {
+                  clickable.click();
+                  return { success: true, method: 'exact-text', element: clickable.tagName };
+                }
+                clickable = clickable.parentElement;
+                depth++;
+              }
+            }
+          }
+          return { success: false };
+        }, reportReason);
+        
+        if (exactTextResult.success) {
+          console.log(`   ✅ Found and clicked reason via exact text match (${exactTextResult.element})`);
+          reasonClicked = true;
+        }
+        
+        // Strategy 2: Find label containing the text and click associated radio
+        if (!reasonClicked) {
+          console.log('   🔍 Strategy 2: Label with associated radio button');
           try {
-            const elements = await page.$x(xpath);
-            if (elements.length > 0) {
-              reasonOption = elements[0];
-              console.log(`✅ Found reason option: ${reportReason}`);
-              break;
+            const labelXPath = `//label[contains(text(), '${reportReason}')]`;
+            const labels = await page.$x(labelXPath);
+            
+            if (labels.length > 0) {
+              console.log(`   ✅ Found ${labels.length} label(s) containing "${reportReason}"`);
+              
+              // Try to find and click associated radio button
+              const radioClicked = await page.evaluate((labelIndex) => {
+                const labels = Array.from(document.querySelectorAll('label'));
+                const label = labels[labelIndex];
+                
+                if (label) {
+                  // Method 1: Click the label itself
+                  label.click();
+                  return true;
+                }
+                return false;
+              }, 0);
+              
+              if (radioClicked) {
+                console.log('   ✅ Clicked label element');
+                reasonClicked = true;
+              }
             }
           } catch (e) {
-            continue;
+            console.log(`   ⚠️ Strategy 2 failed: ${e.message}`);
+          }
+        }
+        
+        // Strategy 3: Find radio button with matching text in parent/sibling
+        if (!reasonClicked) {
+          console.log('   🔍 Strategy 3: Radio button with matching sibling text');
+          const radioClicked = await page.evaluate((reason) => {
+            const radios = Array.from(document.querySelectorAll('[role="radio"], input[type="radio"]'));
+            
+            for (const radio of radios) {
+              // Check parent and sibling text
+              const parent = radio.parentElement;
+              const parentText = (parent?.innerText || parent?.textContent || '').trim();
+              
+              if (parentText.includes(reason)) {
+                radio.click();
+                return true;
+              }
+            }
+            return false;
+          }, reportReason);
+          
+          if (radioClicked) {
+            console.log('   ✅ Clicked radio button via sibling text');
+            reasonClicked = true;
           }
         }
 
-        if (reasonOption) {
-          await reasonOption.click();
-          await this.delay(1000);
+        if (reasonClicked) {
+          console.log(`✅ Successfully selected reason: "${reportReason}"`);
+          await this.delay(1500);
         } else {
-          console.log('⚠️ Could not find specific reason, will submit with default');
+          console.log(`⚠️ Could not find reason "${reportReason}", will submit with default selection`);
+          console.log(`   💡 TIP: Make sure report_reason matches the exact text from Google Maps menu`);
+          console.log(`   💡 For non-English locations, use the translated text (e.g., Portuguese for Brazil)`);
         }
+      }
+
+      // Debug: Show all buttons in the report dialog
+      console.log('🔍 Debugging buttons in report dialog...');
+      try {
+        const dialogButtons = await page.evaluate(() => {
+          const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
+          return buttons.slice(0, 30).map((btn, i) => ({
+            index: i,
+            text: (btn.innerText || btn.textContent || '').substring(0, 100),
+            ariaLabel: btn.getAttribute('aria-label') || '',
+            type: btn.getAttribute('type') || '',
+            className: btn.className?.substring(0, 100) || ''
+          }));
+        });
+        console.log('🔘 Buttons in dialog:', JSON.stringify(dialogButtons, null, 2));
+      } catch (debugError) {
+        console.log('⚠️ Could not debug dialog buttons:', debugError.message);
       }
 
       // Submit the report
       console.log('🔍 Looking for submit button...');
       const submitXPaths = [
-        "//button[contains(text(), 'Submit')]",
-        "//button[contains(text(), 'Report')]",
-        "//button[contains(text(), 'Send')]",
-        "//span[contains(text(), 'Submit')]",
-        "//span[contains(text(), 'Report')]"
+        "//button[contains(translate(text(), 'SUBMIT', 'submit'), 'submit')]",
+        "//button[contains(translate(text(), 'SEND', 'send'), 'send')]", 
+        "//button[contains(translate(text(), 'FLAG', 'flag'), 'flag')]",
+        "//span[contains(translate(text(), 'SUBMIT', 'submit'), 'submit')]/ancestor::button",
+        "//span[contains(translate(text(), 'SEND', 'send'), 'send')]/ancestor::button",
+        "//*[contains(@aria-label, 'Submit')]",
+        "//*[contains(@aria-label, 'Send')]",
+        "//button[@type='submit']"
       ];
 
       let submitted = false;
       for (const xpath of submitXPaths) {
         try {
+          console.log(`   🔍 Trying XPath: ${xpath}`);
           const elements = await page.$x(xpath);
           if (elements.length > 0) {
+            console.log(`   ✅ Found ${elements.length} element(s), clicking first one`);
             await elements[0].click();
             console.log('✅ Report submitted successfully');
             await this.delay(3000);
@@ -635,16 +776,45 @@ class AutomationService {
             break;
           }
         } catch (e) {
+          console.log(`   ⚠️ XPath failed: ${e.message}`);
           continue;
         }
       }
 
       if (!submitted) {
-        // Try CSS selectors as backup
-        const submitButton = await page.$('button[type="submit"]');
-        if (submitButton) {
+        // Try finding any button that looks like a submit button
+        console.log('🔍 Trying alternative button detection...');
+        const submitButton = await page.evaluateHandle(() => {
+          const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
+          for (const btn of buttons) {
+            const text = (btn.innerText || btn.textContent || '').toLowerCase();
+            const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
+            const type = btn.getAttribute('type') || '';
+            
+            // Look for submit-related keywords
+            if (
+              text.includes('submit') ||
+              text.includes('send') ||
+              text.includes('flag') ||
+              text.includes('report') ||
+              ariaLabel.includes('submit') ||
+              ariaLabel.includes('send') ||
+              type === 'submit'
+            ) {
+              // Exclude cancel/close buttons
+              if (!text.includes('cancel') && !text.includes('close') && !text.includes('back')) {
+                return btn;
+              }
+            }
+          }
+          return null;
+        });
+        
+        const isValid = await submitButton.evaluate(el => el !== null);
+        if (isValid) {
+          console.log('✅ Found submit button via alternative detection');
           await submitButton.click();
-          console.log('✅ Report submitted via submit button');
+          console.log('✅ Report submitted successfully');
           await this.delay(3000);
           submitted = true;
         }
@@ -652,6 +822,13 @@ class AutomationService {
 
       if (!submitted) {
         console.log('⚠️ Could not find submit button, report may still have succeeded');
+        // Take screenshot of the dialog for debugging
+        try {
+          await page.screenshot({ path: '/tmp/report-dialog-debug.png', fullPage: false });
+          console.log('📸 Screenshot saved to /tmp/report-dialog-debug.png');
+        } catch (screenshotError) {
+          console.log('⚠️ Could not save screenshot');
+        }
       }
 
       return true;
@@ -744,8 +921,8 @@ class AutomationService {
         throw new Error('Failed to report review');
       }
 
-      // Logout from Gmail
-      await this.logoutFromGmail(page);
+      // Note: No need to logout - we're using OAuth, not Puppeteer login!
+      // The account is verified via Google's API, not browser cookies.
 
       // Update review status to completed
       await this.updateReviewStatus(review.id, 'completed', gmailAccount.id);
