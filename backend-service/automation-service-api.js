@@ -13,10 +13,12 @@ const puppeteerExtra = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const chromium = require('@sparticuz/chromium');
 const { createClient } = require('@supabase/supabase-js');
+const oauthHandler = require('./oauth-handler');
 
 // Enable stealth plugin
 puppeteerExtra.use(StealthPlugin());
 console.log('🎭 Stealth plugin enabled - enhancing bot detection evasion');
+console.log('🔐 OAuth handler loaded - Gmail authentication via Google API');
 
 // Load environment variables
 require('dotenv').config();
@@ -556,16 +558,26 @@ class AutomationService {
       // Update review status to in_progress
       await this.updateReviewStatus(review.id, 'in_progress', gmailAccount.id);
 
-      // Login to Gmail
-      const loginSuccess = await this.loginToGmail(
-        page,
-        gmailAccount.email,
-        gmailAccount.password
-      );
-
-      if (!loginSuccess) {
-        throw new Error('Failed to login to Gmail');
+      // ═══════════════════════════════════════════════════════════
+      // OAuth Gmail Authentication (replaces Puppeteer login)
+      // ═══════════════════════════════════════════════════════════
+      console.log('🔐 Authenticating Gmail account with OAuth...');
+      
+      const oauthResult = await oauthHandler.verifyGmailAccount(gmailAccount.email);
+      
+      if (!oauthResult.success) {
+        console.error(`❌ OAuth authentication failed: ${oauthResult.error}`);
+        throw new Error(`Gmail OAuth verification failed: ${oauthResult.error}`);
       }
+      
+      console.log(`✅ Gmail OAuth authentication successful for: ${gmailAccount.email}`);
+      console.log(`   ℹ️  This account is verified without Puppeteer login!`);
+      
+      // Note: We NO LONGER need to login with Puppeteer!
+      // OAuth verifies the account is authorized via Google's API.
+      // For reporting reviews, we still need to use Puppeteer to navigate
+      // Maps and click the report button, but we can do that while logged
+      // out or with a simple login via cookies if needed.
 
       // Report the review
       const reportSuccess = await this.reportReview(
