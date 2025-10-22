@@ -9,8 +9,8 @@
  */
 
 const puppeteer = require('puppeteer-core');
-   const chromium = require('@sparticuz/chromium');
-   const { createClient } = require('@supabase/supabase-js');
+const chromium = require('@sparticuz/chromium');
+const { createClient } = require('@supabase/supabase-js');
 
 // Load environment variables
 require('dotenv').config();
@@ -460,9 +460,8 @@ class AutomationService {
       // Initialize browser with proxy
       const browser = await this.initBrowser(proxyConfig);
 
-      // Create incognito context
-      const context = await browser.createIncognitoBrowserContext();
-      page = await context.newPage();
+      // Create a new page (puppeteer-core doesn't support createIncognitoBrowserContext with chromium)
+      page = await browser.newPage();
 
       // Set viewport
       await page.setViewport({ width: 1920, height: 1080 });
@@ -528,8 +527,8 @@ class AutomationService {
 
       console.log('✅ Review processing completed successfully\n');
 
-      // Close the incognito context
-      await context.close();
+      // Close the page
+      if (page) await page.close();
 
     } catch (error) {
       console.error('❌ Error processing review:', error.message);
