@@ -258,30 +258,77 @@ class AutomationService {
     try {
       console.log(`📧 Logging into Gmail: ${email}`);
       await page.goto('https://accounts.google.com/', {
-        waitUntil: 'networkidle2'
+        waitUntil: 'networkidle2',
+        timeout: 30000
       });
 
       await this.delay(DELAY_BETWEEN_ACTIONS);
 
       // Enter email
+      console.log('   🔍 Looking for email input...');
       await page.waitForSelector('input[type="email"]', { timeout: 10000 });
       await page.type('input[type="email"]', email, { delay: 100 });
+      console.log('   ✅ Email entered');
       await page.keyboard.press('Enter');
       await this.delay(DELAY_BETWEEN_ACTIONS);
+
+      // Wait for password field or check what Google is showing
+      console.log('   🔍 Looking for password input...');
+      try {
+        await page.waitForSelector('input[type="password"]', { timeout: 15000 });
+        console.log('   ✅ Password field found');
+      } catch (passwordError) {
+        // Take screenshot to see what Google is actually showing
+        console.log('   ⚠️ Password field not found - checking page content...');
+        
+        // Check for common Google security screens
+        const pageText = await page.evaluate(() => document.body.innerText);
+        
+        if (pageText.includes('verify') || pageText.includes('Verify')) {
+          throw new Error('Google verification required - account may need manual verification');
+        }
+        if (pageText.includes('suspicious') || pageText.includes('Suspicious')) {
+          throw new Error('Google detected suspicious activity - account may be locked');
+        }
+        if (pageText.includes('security') || pageText.includes('Security')) {
+          throw new Error('Google security check required - cannot proceed with automation');
+        }
+        if (pageText.includes('phone') || pageText.includes('Phone')) {
+          throw new Error('Google requesting phone verification - automation cannot proceed');
+        }
+        
+        // Log what we see on the page
+        console.log('   📄 Page content preview:', pageText.substring(0, 500));
+        throw new Error('Password field not found - Google may be showing CAPTCHA or security check');
+      }
 
       // Enter password
-      await page.waitForSelector('input[type="password"]', { timeout: 10000 });
       await page.type('input[type="password"]', password, { delay: 100 });
+      console.log('   ✅ Password entered');
       await page.keyboard.press('Enter');
-      await this.delay(DELAY_BETWEEN_ACTIONS);
+      await this.delay(3000);
 
-      // Wait for navigation to complete
-      await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 });
+      // Check if login was successful
+      const finalUrl = page.url();
+      console.log(`   🌐 Final URL: ${finalUrl}`);
+      
+      if (finalUrl.includes('accounts.google.com/signin') || finalUrl.includes('accounts.google.com/challenge')) {
+        throw new Error('Login failed - still on login/challenge page');
+      }
       
       console.log('✅ Gmail login successful');
       return true;
     } catch (error) {
       console.error('❌ Gmail login failed:', error.message);
+      
+      // Log current URL for debugging
+      try {
+        const currentUrl = await page.url();
+        console.error(`   Current URL: ${currentUrl}`);
+      } catch (e) {
+        // Ignore
+      }
+      
       return false;
     }
   }
