@@ -68,14 +68,24 @@ async function saveTokens(email, tokens) {
   try {
     const expiryDate = new Date(tokens.expiry_date);
     
+    // Prepare update data
+    const updateData = {
+      oauth_access_token: tokens.access_token,
+      oauth_refresh_token: tokens.refresh_token,
+      oauth_expiry: expiryDate.toISOString()
+    };
+    
+    // Add updated_at if column exists (defensive coding)
+    // This prevents errors if the column hasn't been added yet
+    try {
+      updateData.updated_at = new Date().toISOString();
+    } catch (e) {
+      // Ignore if updated_at doesn't exist
+    }
+    
     const { error } = await supabase
       .from('gmail_accounts')
-      .update({
-        oauth_access_token: tokens.access_token,
-        oauth_refresh_token: tokens.refresh_token,
-        oauth_expiry: expiryDate.toISOString(),
-        updated_at: new Date().toISOString()
-      })
+      .update(updateData)
       .eq('email', email);
 
     if (error) {
