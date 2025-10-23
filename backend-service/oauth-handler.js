@@ -73,9 +73,17 @@ async function saveTokens(email, tokens) {
     // Prepare update data
     const updateData = {
       oauth_access_token: tokens.access_token,
-      oauth_refresh_token: tokens.refresh_token,
       oauth_expiry: expiryDate.toISOString()
     };
+    
+    // Only update refresh_token if we received a new one
+    // This prevents accidentally overwriting existing refresh_token with null
+    if (tokens.refresh_token) {
+      updateData.oauth_refresh_token = tokens.refresh_token;
+      console.log(`🔑 Updating refresh token for: ${email}`);
+    } else {
+      console.log(`🔄 Refreshing access token only for: ${email} (keeping existing refresh token)`);
+    }
     
     // Add updated_at if column exists (defensive coding)
     // This prevents errors if the column hasn't been added yet
@@ -110,6 +118,8 @@ async function saveTokens(email, tokens) {
  */
 async function getValidAccessToken(email) {
   try {
+    console.log(`🔍 Fetching OAuth tokens for ${email} from database...`);
+    
     // Get tokens from database
     const { data, error } = await supabase
       .from('gmail_accounts')
@@ -122,7 +132,13 @@ async function getValidAccessToken(email) {
       throw new Error('Gmail account not found or not authorized');
     }
 
+    console.log(`   Database query result for ${email}:`);
+    console.log(`   - Has access token: ${!!data.oauth_access_token}`);
+    console.log(`   - Has refresh token: ${!!data.oauth_refresh_token}`);
+    console.log(`   - Token expiry: ${data.oauth_expiry || 'null'}`);
+
     if (!data.oauth_refresh_token) {
+      console.error(`❌ No refresh token found for ${email}`);
       throw new Error('No OAuth tokens found. Please authorize this Gmail account first.');
     }
 
@@ -130,9 +146,14 @@ async function getValidAccessToken(email) {
     const expiryDate = new Date(data.oauth_expiry);
     const now = new Date();
     
+    console.log(`   Token expiry check:`);
+    console.log(`   - Current time: ${now.toISOString()}`);
+    console.log(`   - Token expires: ${expiryDate.toISOString()}`);
+    console.log(`   - Time until expiry: ${Math.round((expiryDate.getTime() - now.getTime()) / 1000 / 60)} minutes`);
+    
     // Token still valid (with 5 min buffer)
     if (now < new Date(expiryDate.getTime() - 5 * 60 * 1000)) {
-      console.log(`✅ Using existing access token for ${email}`);
+      console.log(`✅ Using existing access token for ${email} (valid for ${Math.round((expiryDate.getTime() - now.getTime()) / 1000 / 60)} more minutes)`);
       return data.oauth_access_token;
     }
 
@@ -144,6 +165,7 @@ async function getValidAccessToken(email) {
     });
 
     const { credentials } = await oauth2Client.refreshAccessToken();
+    console.log(`   ✓ Received new access token from Google`);
     
     // Save new tokens
     await saveTokens(email, credentials);
@@ -152,6 +174,7 @@ async function getValidAccessToken(email) {
     return credentials.access_token;
   } catch (error) {
     console.error(`❌ Error getting valid access token for ${email}:`, error.message);
+    console.error(`   Error stack:`, error.stack);
     throw error;
   }
 }
@@ -167,6 +190,7 @@ async function verifyGmailAccount(email) {
     console.log(`🔐 Verifying Gmail account with OAuth: ${email}`);
     
     const accessToken = await getValidAccessToken(email);
+    console.log(`   ✓ Got valid access token for ${email}`);
     
     // Set credentials
     oauth2Client.setCredentials({
@@ -177,6 +201,7 @@ async function verifyGmailAccount(email) {
     const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
     
     // Test API access by getting profile
+    console.log(`   ⏳ Testing Gmail API access for ${email}...`);
     const profile = await gmail.users.getProfile({ userId: 'me' });
     
     console.log(`✅ Gmail OAuth verification successful!`);
@@ -190,18 +215,35 @@ async function verifyGmailAccount(email) {
       threadsTotal: profile.data.threadsTotal
     };
   } catch (error) {
-    console.error(`❌ Gmail OAuth verification failed for ${email}:`, error.message);
+    console.error(`❌ Gmail OAuth verification failed for ${email}`);
+    console.error(`   Error type: ${error.constructor.name}`);
+    console.error(`   Error message: ${error.message}`);
     
-    if (error.message.includes('not authorized')) {
+    if (error.code) {
+      console.error(`   Error code: ${error.code}`);
+    }
+    
+    if (error.errors && error.errors.length > 0) {
+      console.error(`   Detailed errors:`, JSON.stringify(error.errors, null, 2));
+    }
+    
+    if (error.message.includes('not authorized') || error.message.includes('No OAuth tokens')) {
       return {
         success: false,
         error: 'Account not authorized. Please click "Authorize Gmail" button.'
       };
     }
     
+    if (error.message.includes('invalid_grant') || error.message.includes('Token has been expired')) {
+      return {
+        success: false,
+        error: 'OAuth token expired or invalid. Please re-authorize this account.'
+      };
+    }
+    
     return {
       success: false,
-      error: error.message
+      error: error.message || 'Unknown error during Gmail verification'
     };
   }
 }
