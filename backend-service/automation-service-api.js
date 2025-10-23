@@ -122,6 +122,15 @@ class AutomationService {
         launchOptions.args.push(`--proxy-server=${proxyUrl}`);
         console.log(`🌍 Using proxy: ${proxyConfig.protocol}://${proxyConfig.proxy_address}:${proxyConfig.port}`);
         console.log(`   Location: ${proxyConfig.location}, Session: ${proxyConfig.session_type}`);
+        
+        // Debug: Check if credentials exist (without logging actual values)
+        const hasUsername = proxyConfig.username && proxyConfig.username.length > 0;
+        const hasPassword = proxyConfig.password && proxyConfig.password.length > 0;
+        console.log(`   🔐 Credentials: Username=${hasUsername ? '✅' : '❌'}, Password=${hasPassword ? '✅' : '❌'}`);
+        
+        if (!hasUsername || !hasPassword) {
+          console.error(`❌ PROXY ERROR: Missing credentials! Username: ${hasUsername}, Password: ${hasPassword}`);
+        }
       }
 
       this.browser = await puppeteerExtra.launch(launchOptions);
@@ -192,6 +201,16 @@ class AutomationService {
       rotation_enabled
     } = proxyConfig;
     
+    // Validate required fields
+    if (!username || !password || !proxy_address || !port) {
+      console.error('❌ Invalid proxy config: Missing required fields');
+      console.error(`   Username: ${username ? '✅' : '❌'}`);
+      console.error(`   Password: ${password ? '✅' : '❌'}`);
+      console.error(`   Address: ${proxy_address ? '✅' : '❌'}`);
+      console.error(`   Port: ${port ? '✅' : '❌'}`);
+      throw new Error('Invalid proxy configuration: Missing credentials or address');
+    }
+    
     const protocolPrefix = protocol.toLowerCase() === 'socks5' ? 'socks5' : 'http';
     
     // Add session ID to username for IP rotation (if enabled)
@@ -201,7 +220,17 @@ class AutomationService {
       console.log(`🌐 Using rotating IP with session: session${session_counter}`);
     }
     
-    return `${protocolPrefix}://${finalUsername}:${password}@${proxy_address}:${port}`;
+    // URL encode password to handle special characters
+    const encodedPassword = encodeURIComponent(password);
+    
+    // Build proxy URL
+    const proxyUrl = `${protocolPrefix}://${finalUsername}:${encodedPassword}@${proxy_address}:${port}`;
+    
+    // Debug: Log masked URL
+    const maskedUrl = `${protocolPrefix}://${finalUsername}:${'*'.repeat(8)}@${proxy_address}:${port}`;
+    console.log(`   🔗 Proxy URL (masked): ${maskedUrl}`);
+    
+    return proxyUrl;
   }
 
   /**
