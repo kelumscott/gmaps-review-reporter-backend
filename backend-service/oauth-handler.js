@@ -32,8 +32,10 @@ function getAuthUrl(email) {
     access_type: 'offline', // Get refresh token for long-term access
     scope: [
       'https://www.googleapis.com/auth/gmail.readonly',
+      'https://www.googleapis.com/auth/gmail.metadata',
       'https://www.googleapis.com/auth/userinfo.email',
-      'https://www.googleapis.com/auth/userinfo.profile'
+      'https://www.googleapis.com/auth/userinfo.profile',
+      'openid'
     ],
     state: email, // Pass email to remember which account during callback
     prompt: 'consent' // Force consent screen to ensure we get refresh token
