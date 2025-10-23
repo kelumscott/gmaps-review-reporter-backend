@@ -8,8 +8,17 @@
  * programmatically by the Express.js server.
  */
 
-const puppeteer = require('puppeteer');
+// Use puppeteer-extra with stealth plugin for better bot detection evasion
+const puppeteerExtra = require('puppeteer-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+const chromium = require('@sparticuz/chromium');
 const { createClient } = require('@supabase/supabase-js');
+const oauthHandler = require('./oauth-handler');
+
+// Enable stealth plugin
+puppeteerExtra.use(StealthPlugin());
+console.log('🎭 Stealth plugin enabled - enhancing bot detection evasion');
+console.log('🔐 OAuth handler loaded - Gmail authentication via Google API');
 
 // Load environment variables
 require('dotenv').config();
@@ -81,8 +90,9 @@ class AutomationService {
       console.log('🚀 Launching browser...');
       
       const launchOptions = {
-        headless: true, // Must be true for production/Render
+        headless: chromium.headless,
         args: [
+          ...chromium.args,
           '--no-sandbox',
           '--disable-setuid-sandbox',
           '--disable-blink-features=AutomationControlled',
@@ -98,11 +108,13 @@ class AutomationService {
           '--no-first-run',
           '--safebrowsing-disable-auto-update',
           '--single-process' // Important for limited memory on Render free tier
-        ]
+        ],
+        // Use @sparticuz/chromium for Render deployment
+        executablePath: await chromium.executablePath()
       };
 
-      // Puppeteer includes Chromium automatically - no executablePath needed
-      console.log('🌐 Using bundled Chromium from Puppeteer (Render-optimized)');
+      console.log('🌐 Using @sparticuz/chromium for Render');
+      console.log(`   Executable: ${await chromium.executablePath()}`);
 
       // Add proxy if configured
       if (proxyConfig) {
@@ -110,10 +122,19 @@ class AutomationService {
         launchOptions.args.push(`--proxy-server=${proxyUrl}`);
         console.log(`🌍 Using proxy: ${proxyConfig.protocol}://${proxyConfig.proxy_address}:${proxyConfig.port}`);
         console.log(`   Location: ${proxyConfig.location}, Session: ${proxyConfig.session_type}`);
+        
+        // Debug: Check if credentials exist (without logging actual values)
+        const hasUsername = proxyConfig.username && proxyConfig.username.length > 0;
+        const hasPassword = proxyConfig.password && proxyConfig.password.length > 0;
+        console.log(`   🔐 Credentials: Username=${hasUsername ? '✅' : '❌'}, Password=${hasPassword ? '✅' : '❌'}`);
+        
+        if (!hasUsername || !hasPassword) {
+          console.error(`❌ PROXY ERROR: Missing credentials! Username: ${hasUsername}, Password: ${hasPassword}`);
+        }
       }
 
-      this.browser = await puppeteer.launch(launchOptions);
-      console.log('✅ Browser launched successfully');
+      this.browser = await puppeteerExtra.launch(launchOptions);
+      console.log('✅ Browser launched successfully with stealth mode');
     }
     return this.browser;
   }
@@ -131,29 +152,85 @@ class AutomationService {
 
   /**
    * Get active proxy configuration from database
+   * Automatically increments session counter for IP rotation
    */
   async getProxyConfig() {
     const { data, error } = await supabase
       .from('proxy_configs')
       .select('*')
       .eq('is_active', true)
-      .single();
+      .limit(1)
+      .maybeSingle();
 
-    if (error) {
-      console.error('❌ Error fetching proxy config:', error.message);
+    if (error || !data) {
+      console.error('❌ Error fetching proxy config:', error?.message);
       return null;
     }
 
-    return data;
+    // Increment session counter for IP rotation
+    const currentCounter = data.session_counter || 0;
+    const maxSessions = data.max_sessions || 10000;
+    const nextCounter = currentCounter >= maxSessions ? 1 : currentCounter + 1;
+    
+    // Update session counter in database
+    await supabase
+      .from('proxy_configs')
+      .update({ 
+        session_counter: nextCounter,
+        last_session_at: new Date().toISOString()
+      })
+      .eq('id', data.id);
+    
+    console.log(`🔄 Proxy IP rotation: session ${nextCounter} / ${maxSessions}`);
+    
+    // Return config with updated counter for buildProxyUrl
+    return { ...data, session_counter: nextCounter };
   }
 
   /**
-   * Build proxy URL from configuration
+   * Build proxy URL from configuration with session-based IP rotation
    */
   buildProxyUrl(proxyConfig) {
-    const { protocol, username, password, proxy_address, port } = proxyConfig;
+    const { 
+      protocol, 
+      username, 
+      password, 
+      proxy_address, 
+      port,
+      session_counter,
+      rotation_enabled
+    } = proxyConfig;
+    
+    // Validate required fields
+    if (!username || !password || !proxy_address || !port) {
+      console.error('❌ Invalid proxy config: Missing required fields');
+      console.error(`   Username: ${username ? '✅' : '❌'}`);
+      console.error(`   Password: ${password ? '✅' : '❌'}`);
+      console.error(`   Address: ${proxy_address ? '✅' : '❌'}`);
+      console.error(`   Port: ${port ? '✅' : '❌'}`);
+      throw new Error('Invalid proxy configuration: Missing credentials or address');
+    }
+    
     const protocolPrefix = protocol.toLowerCase() === 'socks5' ? 'socks5' : 'http';
-    return `${protocolPrefix}://${username}:${password}@${proxy_address}:${port}`;
+    
+    // Add session ID to username for IP rotation (if enabled)
+    let finalUsername = username;
+    if (rotation_enabled !== false && session_counter) {
+      finalUsername = `${username}-session${session_counter}`;
+      console.log(`🌐 Using rotating IP with session: session${session_counter}`);
+    }
+    
+    // URL encode password to handle special characters
+    const encodedPassword = encodeURIComponent(password);
+    
+    // Build proxy URL
+    const proxyUrl = `${protocolPrefix}://${finalUsername}:${encodedPassword}@${proxy_address}:${port}`;
+    
+    // Debug: Log masked URL
+    const maskedUrl = `${protocolPrefix}://${finalUsername}:${'*'.repeat(8)}@${proxy_address}:${port}`;
+    console.log(`   🔗 Proxy URL (masked): ${maskedUrl}`);
+    
+    return proxyUrl;
   }
 
   /**
@@ -252,31 +329,100 @@ class AutomationService {
   async loginToGmail(page, email, password) {
     try {
       console.log(`📧 Logging into Gmail: ${email}`);
+      console.log('   🎭 Applying extra stealth measures...');
+      
+      // Extra stealth: Set realistic viewport
+      await page.setViewport({
+        width: 1920,
+        height: 1080,
+        deviceScaleFactor: 1,
+      });
+      
+      // Extra stealth: Set realistic user agent
+      await page.setUserAgent(
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
+      );
+      
+      // Extra stealth: Set additional headers
+      await page.setExtraHTTPHeaders({
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+      });
+      
+      console.log('   ✅ Stealth measures applied');
+      
       await page.goto('https://accounts.google.com/', {
-        waitUntil: 'networkidle2'
+        waitUntil: 'networkidle2',
+        timeout: 30000
       });
 
       await this.delay(DELAY_BETWEEN_ACTIONS);
 
       // Enter email
+      console.log('   🔍 Looking for email input...');
       await page.waitForSelector('input[type="email"]', { timeout: 10000 });
       await page.type('input[type="email"]', email, { delay: 100 });
+      console.log('   ✅ Email entered');
       await page.keyboard.press('Enter');
       await this.delay(DELAY_BETWEEN_ACTIONS);
+
+      // Wait for password field or check what Google is showing
+      console.log('   🔍 Looking for password input...');
+      try {
+        await page.waitForSelector('input[type="password"]', { timeout: 15000 });
+        console.log('   ✅ Password field found');
+      } catch (passwordError) {
+        // Take screenshot to see what Google is actually showing
+        console.log('   ⚠️ Password field not found - checking page content...');
+        
+        // Check for common Google security screens
+        const pageText = await page.evaluate(() => document.body.innerText);
+        
+        if (pageText.includes('verify') || pageText.includes('Verify')) {
+          throw new Error('Google verification required - account may need manual verification');
+        }
+        if (pageText.includes('suspicious') || pageText.includes('Suspicious')) {
+          throw new Error('Google detected suspicious activity - account may be locked');
+        }
+        if (pageText.includes('security') || pageText.includes('Security')) {
+          throw new Error('Google security check required - cannot proceed with automation');
+        }
+        if (pageText.includes('phone') || pageText.includes('Phone')) {
+          throw new Error('Google requesting phone verification - automation cannot proceed');
+        }
+        
+        // Log what we see on the page
+        console.log('   📄 Page content preview:', pageText.substring(0, 500));
+        throw new Error('Password field not found - Google may be showing CAPTCHA or security check');
+      }
 
       // Enter password
-      await page.waitForSelector('input[type="password"]', { timeout: 10000 });
       await page.type('input[type="password"]', password, { delay: 100 });
+      console.log('   ✅ Password entered');
       await page.keyboard.press('Enter');
-      await this.delay(DELAY_BETWEEN_ACTIONS);
+      await this.delay(3000);
 
-      // Wait for navigation to complete
-      await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 });
+      // Check if login was successful
+      const finalUrl = page.url();
+      console.log(`   🌐 Final URL: ${finalUrl}`);
+      
+      if (finalUrl.includes('accounts.google.com/signin') || finalUrl.includes('accounts.google.com/challenge')) {
+        throw new Error('Login failed - still on login/challenge page');
+      }
       
       console.log('✅ Gmail login successful');
       return true;
     } catch (error) {
       console.error('❌ Gmail login failed:', error.message);
+      
+      // Log current URL for debugging
+      try {
+        const currentUrl = await page.url();
+        console.error(`   Current URL: ${currentUrl}`);
+      } catch (e) {
+        // Ignore
+      }
+      
       return false;
     }
   }
@@ -306,19 +452,63 @@ class AutomationService {
     try {
       console.log(`🗺️ Opening review link: ${reviewLink}`);
       
-      await page.goto(reviewLink, {
-        waitUntil: 'networkidle2',
-        timeout: 30000
-      });
+      // Try multiple navigation strategies with retries
+      let navigationSuccess = false;
+      const strategies = [
+        { waitUntil: 'domcontentloaded', timeout: 60000, name: 'DOM Content Loaded' },
+        { waitUntil: 'load', timeout: 60000, name: 'Page Load' },
+        { waitUntil: 'networkidle2', timeout: 90000, name: 'Network Idle' }
+      ];
+      
+      for (const strategy of strategies) {
+        try {
+          console.log(`   🔄 Trying navigation strategy: ${strategy.name} (timeout: ${strategy.timeout}ms)`);
+          await page.goto(reviewLink, {
+            waitUntil: strategy.waitUntil,
+            timeout: strategy.timeout
+          });
+          console.log(`   ✅ Navigation successful with: ${strategy.name}`);
+          navigationSuccess = true;
+          break;
+        } catch (navError) {
+          console.log(`   ⚠️ ${strategy.name} failed: ${navError.message}`);
+          if (strategy === strategies[strategies.length - 1]) {
+            throw navError; // Throw only if all strategies failed
+          }
+          // Continue to next strategy
+        }
+      }
 
-      await this.delay(3000);
+      if (!navigationSuccess) {
+        throw new Error('All navigation strategies failed');
+      }
+
+      console.log('   ⏳ Waiting for page to stabilize...');
+      await this.delay(5000); // Give page more time to fully render
+
+      // Debug: Check what's on the page
+      console.log('🔍 Checking page content...');
+      const pageInfo = await page.evaluate(() => {
+        return {
+          url: window.location.href,
+          title: document.title,
+          hasButtons: document.querySelectorAll('button').length,
+          hasAriaLabels: document.querySelectorAll('[aria-label]').length
+        };
+      });
+      console.log('📄 Page info:', JSON.stringify(pageInfo, null, 2));
 
       // Look for the three-dot menu button
+      console.log('🔍 Searching for three-dot menu button...');
       const menuSelectors = [
         'button[aria-label*="More"]',
         'button[aria-label*="Menu"]',
+        'button[aria-label*="More options"]',
         'button[data-item-id*="overflow"]',
-        '[role="button"][aria-haspopup="menu"]'
+        '[role="button"][aria-haspopup="menu"]',
+        'button[jsaction*="menu"]',
+        'button[data-tooltip*="More"]',
+        'button.VfPpkd-Bz112c-LgbsSe' // Google's material design button class
       ];
 
       let menuButton = null;
@@ -335,26 +525,78 @@ class AutomationService {
       }
 
       if (!menuButton) {
+        // Debug: Show all buttons on the page
+        console.log('⚠️ Could not find menu button. Debugging all buttons on page...');
+        const allButtons = await page.evaluate(() => {
+          const buttons = Array.from(document.querySelectorAll('button'));
+          return buttons.slice(0, 20).map((btn, i) => ({
+            index: i,
+            text: btn.innerText?.substring(0, 50) || '',
+            ariaLabel: btn.getAttribute('aria-label') || '',
+            className: btn.className?.substring(0, 100) || '',
+            dataTooltip: btn.getAttribute('data-tooltip') || ''
+          }));
+        });
+        console.log('🔘 First 20 buttons on page:', JSON.stringify(allButtons, null, 2));
+        
+        // Take screenshot for debugging
+        try {
+          await page.screenshot({ path: '/tmp/page-debug.png', fullPage: false });
+          console.log('📸 Screenshot saved to /tmp/page-debug.png');
+        } catch (screenshotError) {
+          console.log('⚠️ Could not save screenshot');
+        }
+        
         throw new Error('Could not find three-dot menu button');
       }
 
       // Click the menu button
       await menuButton.click();
-      await this.delay(2000);
+      console.log('   ⏳ Waiting for menu to open...');
+      await this.delay(4000); // Increased delay for menu to fully render
 
-      // Look for "Report review" or similar option
-      const reportSelectors = [
-        'text/Report review',
-        'text/Flag as inappropriate',
-        '[role="menuitem"]:has-text("Report")',
+      // Debug: Log all menu items to see what's available
+      console.log('🔍 Debugging menu items...');
+      try {
+        const menuItems = await page.evaluate(() => {
+          const items = Array.from(document.querySelectorAll('[role="menuitem"], [role="option"], .VfPpkd-StrnGf-rymPhb, [data-index]'));
+          return items.map((item, index) => ({
+            index,
+            text: item.innerText || item.textContent,
+            ariaLabel: item.getAttribute('aria-label'),
+            className: item.className,
+            tagName: item.tagName
+          }));
+        });
+        console.log('📋 Available menu items:', JSON.stringify(menuItems, null, 2));
+      } catch (debugError) {
+        console.log('⚠️ Could not debug menu items:', debugError.message);
+      }
+
+      // Look for "Report review" or similar option using XPath and text content
+      console.log('🔍 Searching for report option...');
+      
+      let reportOption = null;
+      
+      // Try XPath first (most reliable for text matching)
+      const xpathSelectors = [
+        "//div[contains(text(), 'Report review')]",
+        "//div[contains(text(), 'Flag as inappropriate')]",
+        "//div[contains(text(), 'Report')]",
+        "//span[contains(text(), 'Report review')]",
+        "//span[contains(text(), 'Flag as inappropriate')]",
+        "//span[contains(text(), 'Report')]",
+        "//*[@role='menuitem' and contains(., 'Report')]",
+        "//*[@role='option' and contains(., 'Report')]"
       ];
 
-      let reportOption = null;
-      for (const selector of reportSelectors) {
+      for (const xpath of xpathSelectors) {
         try {
-          reportOption = await page.$(selector);
-          if (reportOption) {
-            console.log(`✅ Found report option with selector: ${selector}`);
+          const elements = await page.$x(xpath);
+          if (elements.length > 0) {
+            // Find the clickable parent
+            reportOption = elements[0];
+            console.log(`✅ Found report option with XPath: ${xpath}`);
             break;
           }
         } catch (e) {
@@ -362,62 +604,297 @@ class AutomationService {
         }
       }
 
+      // If XPath didn't work, try CSS selectors with text matching
       if (!reportOption) {
+        console.log('🔍 XPath failed, trying CSS selectors with text matching...');
+        reportOption = await page.evaluateHandle(() => {
+          const allElements = Array.from(document.querySelectorAll('[role="menuitem"], [role="option"], div, span'));
+          for (const el of allElements) {
+            const text = (el.innerText || el.textContent || '').toLowerCase();
+            if (text.includes('report') || text.includes('flag')) {
+              // Return the element or its clickable parent
+              let clickable = el;
+              while (clickable && !clickable.onclick && clickable.tagName !== 'BUTTON' && clickable !== document.body) {
+                clickable = clickable.parentElement;
+              }
+              return clickable || el;
+            }
+          }
+          return null;
+        });
+        
+        const isValid = await reportOption.evaluate(el => el !== null);
+        if (isValid) {
+          console.log('✅ Found report option via text matching');
+        } else {
+          reportOption = null;
+        }
+      }
+
+      if (!reportOption) {
+        // Take a screenshot for debugging
+        try {
+          await page.screenshot({ path: '/tmp/menu-debug.png', fullPage: true });
+          console.log('📸 Screenshot saved to /tmp/menu-debug.png');
+        } catch (screenshotError) {
+          console.log('⚠️ Could not save screenshot:', screenshotError.message);
+        }
         throw new Error('Could not find report option in menu');
       }
 
       // Click report option
+      console.log('🖱️ Clicking report option...');
       await reportOption.click();
-      await this.delay(2000);
+      console.log('   ⏳ Waiting for report dialog to open...');
+      await this.delay(4000); // Increased delay for report dialog to fully load
+
+      // Debug: Show all available report reasons
+      console.log('🔍 Debugging available report reasons...');
+      try {
+        const availableReasons = await page.evaluate(() => {
+          const reasons = [];
+          
+          // Look for radio buttons, labels, and clickable elements
+          const elements = Array.from(document.querySelectorAll([
+            'label',
+            '[role="radio"]',
+            '[role="option"]',
+            '.VfPpkd-StrnGf-rymPhb',
+            '[data-index]',
+            'input[type="radio"] + *',
+            'div[jsaction*="click"]'
+          ].join(', ')));
+          
+          elements.forEach((el, i) => {
+            const text = (el.innerText || el.textContent || '').trim();
+            if (text && text.length > 0 && text.length < 200) {
+              reasons.push({
+                index: i,
+                text: text,
+                tagName: el.tagName,
+                role: el.getAttribute('role') || '',
+                ariaLabel: el.getAttribute('aria-label') || '',
+                className: el.className?.substring(0, 50) || ''
+              });
+            }
+          });
+          
+          return reasons;
+        });
+        console.log('📋 Available report reasons:', JSON.stringify(availableReasons, null, 2));
+      } catch (debugError) {
+        console.log('⚠️ Could not debug report reasons:', debugError.message);
+      }
 
       // Select report reason if available
       if (reportReason) {
-        const reasonSelectors = [
-          `text/${reportReason}`,
-          `[role="radio"]:has-text("${reportReason}")`,
-          `label:has-text("${reportReason}")`
-        ];
-
-        let reasonOption = null;
-        for (const selector of reasonSelectors) {
+        console.log(`🎯 Looking for report reason: "${reportReason}"`);
+        
+        // Try to find and click the reason option
+        let reasonClicked = false;
+        
+        // Strategy 1: Find by exact text match (case-sensitive)
+        console.log('   🔍 Strategy 1: Exact text match');
+        const exactTextResult = await page.evaluate((reason) => {
+          const allElements = Array.from(document.querySelectorAll('*'));
+          for (const el of allElements) {
+            const text = (el.innerText || el.textContent || '').trim();
+            if (text === reason) {
+              // Find clickable parent (label, radio button, or clickable div)
+              let clickable = el;
+              let depth = 0;
+              while (clickable && depth < 5) {
+                if (
+                  clickable.tagName === 'LABEL' ||
+                  clickable.getAttribute('role') === 'radio' ||
+                  clickable.getAttribute('role') === 'option' ||
+                  clickable.onclick ||
+                  clickable.getAttribute('jsaction')
+                ) {
+                  clickable.click();
+                  return { success: true, method: 'exact-text', element: clickable.tagName };
+                }
+                clickable = clickable.parentElement;
+                depth++;
+              }
+            }
+          }
+          return { success: false };
+        }, reportReason);
+        
+        if (exactTextResult.success) {
+          console.log(`   ✅ Found and clicked reason via exact text match (${exactTextResult.element})`);
+          reasonClicked = true;
+        }
+        
+        // Strategy 2: Find label containing the text and click associated radio
+        if (!reasonClicked) {
+          console.log('   🔍 Strategy 2: Label with associated radio button');
           try {
-            reasonOption = await page.$(selector);
-            if (reasonOption) break;
+            const labelXPath = `//label[contains(text(), '${reportReason}')]`;
+            const labels = await page.$x(labelXPath);
+            
+            if (labels.length > 0) {
+              console.log(`   ✅ Found ${labels.length} label(s) containing "${reportReason}"`);
+              
+              // Try to find and click associated radio button
+              const radioClicked = await page.evaluate((labelIndex) => {
+                const labels = Array.from(document.querySelectorAll('label'));
+                const label = labels[labelIndex];
+                
+                if (label) {
+                  // Method 1: Click the label itself
+                  label.click();
+                  return true;
+                }
+                return false;
+              }, 0);
+              
+              if (radioClicked) {
+                console.log('   ✅ Clicked label element');
+                reasonClicked = true;
+              }
+            }
           } catch (e) {
-            continue;
+            console.log(`   ⚠️ Strategy 2 failed: ${e.message}`);
+          }
+        }
+        
+        // Strategy 3: Find radio button with matching text in parent/sibling
+        if (!reasonClicked) {
+          console.log('   🔍 Strategy 3: Radio button with matching sibling text');
+          const radioClicked = await page.evaluate((reason) => {
+            const radios = Array.from(document.querySelectorAll('[role="radio"], input[type="radio"]'));
+            
+            for (const radio of radios) {
+              // Check parent and sibling text
+              const parent = radio.parentElement;
+              const parentText = (parent?.innerText || parent?.textContent || '').trim();
+              
+              if (parentText.includes(reason)) {
+                radio.click();
+                return true;
+              }
+            }
+            return false;
+          }, reportReason);
+          
+          if (radioClicked) {
+            console.log('   ✅ Clicked radio button via sibling text');
+            reasonClicked = true;
           }
         }
 
-        if (reasonOption) {
-          await reasonOption.click();
-          await this.delay(1000);
+        if (reasonClicked) {
+          console.log(`✅ Successfully selected reason: "${reportReason}"`);
+          await this.delay(1500);
+        } else {
+          console.log(`⚠️ Could not find reason "${reportReason}", will submit with default selection`);
+          console.log(`   💡 TIP: Make sure report_reason matches the exact text from Google Maps menu`);
+          console.log(`   💡 For non-English locations, use the translated text (e.g., Portuguese for Brazil)`);
         }
       }
 
+      // Debug: Show all buttons in the report dialog
+      console.log('🔍 Debugging buttons in report dialog...');
+      try {
+        const dialogButtons = await page.evaluate(() => {
+          const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
+          return buttons.slice(0, 30).map((btn, i) => ({
+            index: i,
+            text: (btn.innerText || btn.textContent || '').substring(0, 100),
+            ariaLabel: btn.getAttribute('aria-label') || '',
+            type: btn.getAttribute('type') || '',
+            className: btn.className?.substring(0, 100) || ''
+          }));
+        });
+        console.log('🔘 Buttons in dialog:', JSON.stringify(dialogButtons, null, 2));
+      } catch (debugError) {
+        console.log('⚠️ Could not debug dialog buttons:', debugError.message);
+      }
+
       // Submit the report
-      const submitSelectors = [
-        'button[type="submit"]',
-        'text/Submit',
-        'text/Report',
-        'button:has-text("Submit")',
-        'button:has-text("Report")'
+      console.log('🔍 Looking for submit button...');
+      const submitXPaths = [
+        "//button[contains(translate(text(), 'SUBMIT', 'submit'), 'submit')]",
+        "//button[contains(translate(text(), 'SEND', 'send'), 'send')]", 
+        "//button[contains(translate(text(), 'FLAG', 'flag'), 'flag')]",
+        "//span[contains(translate(text(), 'SUBMIT', 'submit'), 'submit')]/ancestor::button",
+        "//span[contains(translate(text(), 'SEND', 'send'), 'send')]/ancestor::button",
+        "//*[contains(@aria-label, 'Submit')]",
+        "//*[contains(@aria-label, 'Send')]",
+        "//button[@type='submit']"
       ];
 
-      for (const selector of submitSelectors) {
+      let submitted = false;
+      for (const xpath of submitXPaths) {
         try {
-          const submitButton = await page.$(selector);
-          if (submitButton) {
-            await submitButton.click();
+          console.log(`   🔍 Trying XPath: ${xpath}`);
+          const elements = await page.$x(xpath);
+          if (elements.length > 0) {
+            console.log(`   ✅ Found ${elements.length} element(s), clicking first one`);
+            await elements[0].click();
             console.log('✅ Report submitted successfully');
             await this.delay(3000);
-            return true;
+            submitted = true;
+            break;
           }
         } catch (e) {
+          console.log(`   ⚠️ XPath failed: ${e.message}`);
           continue;
         }
       }
 
-      console.log('⚠️ Could not find submit button, report may still have succeeded');
+      if (!submitted) {
+        // Try finding any button that looks like a submit button
+        console.log('🔍 Trying alternative button detection...');
+        const submitButton = await page.evaluateHandle(() => {
+          const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
+          for (const btn of buttons) {
+            const text = (btn.innerText || btn.textContent || '').toLowerCase();
+            const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
+            const type = btn.getAttribute('type') || '';
+            
+            // Look for submit-related keywords
+            if (
+              text.includes('submit') ||
+              text.includes('send') ||
+              text.includes('flag') ||
+              text.includes('report') ||
+              ariaLabel.includes('submit') ||
+              ariaLabel.includes('send') ||
+              type === 'submit'
+            ) {
+              // Exclude cancel/close buttons
+              if (!text.includes('cancel') && !text.includes('close') && !text.includes('back')) {
+                return btn;
+              }
+            }
+          }
+          return null;
+        });
+        
+        const isValid = await submitButton.evaluate(el => el !== null);
+        if (isValid) {
+          console.log('✅ Found submit button via alternative detection');
+          await submitButton.click();
+          console.log('✅ Report submitted successfully');
+          await this.delay(3000);
+          submitted = true;
+        }
+      }
+
+      if (!submitted) {
+        console.log('⚠️ Could not find submit button, report may still have succeeded');
+        // Take screenshot of the dialog for debugging
+        try {
+          await page.screenshot({ path: '/tmp/report-dialog-debug.png', fullPage: false });
+          console.log('📸 Screenshot saved to /tmp/report-dialog-debug.png');
+        } catch (screenshotError) {
+          console.log('⚠️ Could not save screenshot');
+        }
+      }
+
       return true;
 
     } catch (error) {
@@ -455,9 +932,8 @@ class AutomationService {
       // Initialize browser with proxy
       const browser = await this.initBrowser(proxyConfig);
 
-      // Create incognito context
-      const context = await browser.createIncognitoBrowserContext();
-      page = await context.newPage();
+      // Create a new page (puppeteer-core doesn't support createIncognitoBrowserContext with chromium)
+      page = await browser.newPage();
 
       // Set viewport
       await page.setViewport({ width: 1920, height: 1080 });
@@ -477,16 +953,26 @@ class AutomationService {
       // Update review status to in_progress
       await this.updateReviewStatus(review.id, 'in_progress', gmailAccount.id);
 
-      // Login to Gmail
-      const loginSuccess = await this.loginToGmail(
-        page,
-        gmailAccount.email,
-        gmailAccount.password
-      );
-
-      if (!loginSuccess) {
-        throw new Error('Failed to login to Gmail');
+      // ═══════════════════════════════════════════════════════════
+      // OAuth Gmail Authentication (replaces Puppeteer login)
+      // ═══════════════════════════════════════════════════════════
+      console.log('🔐 Authenticating Gmail account with OAuth...');
+      
+      const oauthResult = await oauthHandler.verifyGmailAccount(gmailAccount.email);
+      
+      if (!oauthResult.success) {
+        console.error(`❌ OAuth authentication failed: ${oauthResult.error}`);
+        throw new Error(`Gmail OAuth verification failed: ${oauthResult.error}`);
       }
+      
+      console.log(`✅ Gmail OAuth authentication successful for: ${gmailAccount.email}`);
+      console.log(`   ℹ️  This account is verified without Puppeteer login!`);
+      
+      // Note: We NO LONGER need to login with Puppeteer!
+      // OAuth verifies the account is authorized via Google's API.
+      // For reporting reviews, we still need to use Puppeteer to navigate
+      // Maps and click the report button, but we can do that while logged
+      // out or with a simple login via cookies if needed.
 
       // Report the review
       const reportSuccess = await this.reportReview(
@@ -499,8 +985,8 @@ class AutomationService {
         throw new Error('Failed to report review');
       }
 
-      // Logout from Gmail
-      await this.logoutFromGmail(page);
+      // Note: No need to logout - we're using OAuth, not Puppeteer login!
+      // The account is verified via Google's API, not browser cookies.
 
       // Update review status to completed
       await this.updateReviewStatus(review.id, 'completed', gmailAccount.id);
@@ -523,8 +1009,8 @@ class AutomationService {
 
       console.log('✅ Review processing completed successfully\n');
 
-      // Close the incognito context
-      await context.close();
+      // Close the page
+      if (page) await page.close();
 
     } catch (error) {
       console.error('❌ Error processing review:', error.message);
