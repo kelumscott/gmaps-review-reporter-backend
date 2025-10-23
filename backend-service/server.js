@@ -43,9 +43,34 @@ const supabase = createClient(
 
 const { AutomationService } = require('./automation-service-api');
 const oauthHandler = require('./oauth-handler');
+const legalFormHandler = require('./legal-form-handler');
+const openaiHandler = require('./openai-handler');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+
+// Initialize Phase 2 services
+console.log('\n🔧 Initializing Phase 2 services...');
+
+// Initialize OpenAI
+if (process.env.OPENAI_API_KEY) {
+  openaiHandler.initialize(process.env.OPENAI_API_KEY, 'gpt-4o');
+  console.log('✅ OpenAI handler loaded - GPT-4o analysis ready');
+} else {
+  console.warn('⚠️  OpenAI API key not set - AI analysis disabled');
+  console.warn('   Set OPENAI_API_KEY environment variable to enable');
+}
+
+// Initialize CapSolver
+if (process.env.CAPSOLVER_API_KEY) {
+  legalFormHandler.initializeCaptcha(process.env.CAPSOLVER_API_KEY);
+  console.log('✅ CapSolver initialized (60% cheaper than 2Captcha)');
+} else {
+  console.warn('⚠️  CapSolver API key not set - CAPTCHA solving disabled');
+  console.warn('   Set CAPSOLVER_API_KEY environment variable to enable legal forms');
+}
+
+console.log('');
 
 // Middleware - CORS configuration for Figma Make
 app.use(cors({
