@@ -143,6 +143,7 @@ class AutomationService {
 
   /**
    * Get active proxy configuration from database
+   * Automatically increments session counter for IP rotation
    */
   async getProxyConfig() {
     const { data, error } = await supabase
@@ -152,21 +153,55 @@ class AutomationService {
       .limit(1)
       .maybeSingle();
 
-    if (error) {
-      console.error('❌ Error fetching proxy config:', error.message);
+    if (error || !data) {
+      console.error('❌ Error fetching proxy config:', error?.message);
       return null;
     }
 
-    return data;
+    // Increment session counter for IP rotation
+    const currentCounter = data.session_counter || 0;
+    const maxSessions = data.max_sessions || 10000;
+    const nextCounter = currentCounter >= maxSessions ? 1 : currentCounter + 1;
+    
+    // Update session counter in database
+    await supabase
+      .from('proxy_configs')
+      .update({ 
+        session_counter: nextCounter,
+        last_session_at: new Date().toISOString()
+      })
+      .eq('id', data.id);
+    
+    console.log(`🔄 Proxy IP rotation: session ${nextCounter} / ${maxSessions}`);
+    
+    // Return config with updated counter for buildProxyUrl
+    return { ...data, session_counter: nextCounter };
   }
 
   /**
-   * Build proxy URL from configuration
+   * Build proxy URL from configuration with session-based IP rotation
    */
   buildProxyUrl(proxyConfig) {
-    const { protocol, username, password, proxy_address, port } = proxyConfig;
+    const { 
+      protocol, 
+      username, 
+      password, 
+      proxy_address, 
+      port,
+      session_counter,
+      rotation_enabled
+    } = proxyConfig;
+    
     const protocolPrefix = protocol.toLowerCase() === 'socks5' ? 'socks5' : 'http';
-    return `${protocolPrefix}://${username}:${password}@${proxy_address}:${port}`;
+    
+    // Add session ID to username for IP rotation (if enabled)
+    let finalUsername = username;
+    if (rotation_enabled !== false && session_counter) {
+      finalUsername = `${username}-session${session_counter}`;
+      console.log(`🌐 Using rotating IP with session: session${session_counter}`);
+    }
+    
+    return `${protocolPrefix}://${finalUsername}:${password}@${proxy_address}:${port}`;
   }
 
   /**
