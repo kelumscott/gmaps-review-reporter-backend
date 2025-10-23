@@ -28,20 +28,26 @@ const oauth2Client = new google.auth.OAuth2(
  * @returns {string} Authorization URL
  */
 function getAuthUrl(email) {
+  // Request comprehensive Gmail scopes to avoid "Insufficient Permission" errors
+  const scopes = [
+    'https://www.googleapis.com/auth/gmail.readonly',      // Read Gmail messages
+    'https://www.googleapis.com/auth/gmail.metadata',      // Access Gmail metadata
+    'https://www.googleapis.com/auth/gmail.modify',        // Modify Gmail messages (needed for full functionality)
+    'https://www.googleapis.com/auth/userinfo.email',      // Get user email
+    'https://www.googleapis.com/auth/userinfo.profile',    // Get user profile
+    'openid'                                                // OpenID Connect
+  ];
+  
   const authUrl = oauth2Client.generateAuthUrl({
-    access_type: 'offline', // Get refresh token for long-term access
-    scope: [
-      'https://www.googleapis.com/auth/gmail.readonly',
-      'https://www.googleapis.com/auth/gmail.metadata',
-      'https://www.googleapis.com/auth/userinfo.email',
-      'https://www.googleapis.com/auth/userinfo.profile',
-      'openid'
-    ],
-    state: email, // Pass email to remember which account during callback
-    prompt: 'consent' // Force consent screen to ensure we get refresh token
+    access_type: 'offline',     // Get refresh token for long-term access
+    scope: scopes,
+    state: email,                // Pass email to remember which account during callback
+    prompt: 'consent',           // Force consent screen to ensure we get refresh token and latest scopes
+    include_granted_scopes: true // Include previously granted scopes
   });
 
   console.log(`🔐 Generated OAuth URL for: ${email}`);
+  console.log(`   Requesting scopes:`, scopes.join(', '));
   return authUrl;
 }
 
@@ -54,6 +60,11 @@ async function getTokensFromCode(code) {
   try {
     const { tokens } = await oauth2Client.getToken(code);
     console.log('✅ Successfully exchanged auth code for tokens');
+    console.log('   Token details:');
+    console.log('   - Has access_token:', !!tokens.access_token);
+    console.log('   - Has refresh_token:', !!tokens.refresh_token);
+    console.log('   - Expires in:', tokens.expiry_date ? `${Math.round((tokens.expiry_date - Date.now()) / 1000 / 60)} minutes` : 'unknown');
+    console.log('   - Scopes granted:', tokens.scope || 'not specified in response');
     return tokens;
   } catch (error) {
     console.error('❌ Error getting tokens from code:', error.message);
@@ -192,6 +203,31 @@ async function verifyGmailAccount(email) {
     const accessToken = await getValidAccessToken(email);
     console.log(`   ✓ Got valid access token for ${email}`);
     
+    // Check token scopes for debugging
+    const tokenInfo = await getTokenInfo(accessToken);
+    if (tokenInfo) {
+      console.log(`   📋 Token scopes:`, tokenInfo.scope || 'unknown');
+      console.log(`   📧 Token email:`, tokenInfo.email || 'unknown');
+      console.log(`   ⏰ Token expires in:`, tokenInfo.expires_in ? `${tokenInfo.expires_in} seconds` : 'unknown');
+      
+      // Warn if critical scopes are missing
+      const hasGmailScope = tokenInfo.scope && (
+        tokenInfo.scope.includes('gmail.readonly') || 
+        tokenInfo.scope.includes('gmail.modify') ||
+        tokenInfo.scope.includes('mail.google.com')
+      );
+      
+      if (!hasGmailScope) {
+        console.warn(`   ⚠️  WARNING: Token missing Gmail scopes! This will cause "Insufficient Permission" errors.`);
+        console.warn(`   ⚠️  User needs to re-authorize with updated permissions.`);
+        return {
+          success: false,
+          error: 'Insufficient Permission: Token was authorized with old/limited scopes. Please re-authorize this account to grant updated permissions.',
+          needsReauth: true
+        };
+      }
+    }
+    
     // Set credentials
     oauth2Client.setCredentials({
       access_token: accessToken
@@ -225,6 +261,16 @@ async function verifyGmailAccount(email) {
     
     if (error.errors && error.errors.length > 0) {
       console.error(`   Detailed errors:`, JSON.stringify(error.errors, null, 2));
+    }
+    
+    // Handle insufficient permission specifically
+    if (error.message.includes('Insufficient Permission') || (error.code === 403 && error.message.includes('ufficient'))) {
+      return {
+        success: false,
+        error: 'Insufficient Permission: Your account was authorized with limited scopes. Please REVOKE access in your Google Account settings (https://myaccount.google.com/permissions), then re-authorize here to grant full permissions.',
+        needsReauth: true,
+        revokeUrl: 'https://myaccount.google.com/permissions'
+      };
     }
     
     if (error.message.includes('not authorized') || error.message.includes('No OAuth tokens')) {
@@ -269,11 +315,29 @@ async function hasOAuthTokens(email) {
   }
 }
 
+/**
+ * Get token info including scopes
+ * Useful for debugging permission issues
+ * @param {string} accessToken - Access token to inspect
+ * @returns {Promise<object>} Token info from Google
+ */
+async function getTokenInfo(accessToken) {
+  try {
+    const response = await fetch(`https://www.googleapis.com/oauth2/v1/tokeninfo?access_token=${accessToken}`);
+    const info = await response.json();
+    return info;
+  } catch (error) {
+    console.error('Error getting token info:', error);
+    return null;
+  }
+}
+
 module.exports = {
   getAuthUrl,
   getTokensFromCode,
   saveTokens,
   getValidAccessToken,
   verifyGmailAccount,
-  hasOAuthTokens
+  hasOAuthTokens,
+  getTokenInfo
 };
