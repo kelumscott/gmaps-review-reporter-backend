@@ -1257,7 +1257,21 @@ class AutomationService {
       if (!reportOption) {
         console.log('🔍 XPath failed, trying BROAD CSS text search...');
         reportOption = await page.evaluateHandle(() => {
-          // Search through MANY more elements
+          // PRIORITY 1: Look for menuitemradio with "Report review" text
+          console.log('   Strategy 1: Looking for role="menuitemradio" with "report" text...');
+          const menuItems = Array.from(document.querySelectorAll('[role="menuitemradio"], [role="menuitem"]'));
+          
+          for (const item of menuItems) {
+            const text = (item.innerText || item.textContent || '').trim().toLowerCase();
+            if (text.includes('report') && !text.includes('share')) {
+              console.log(`   ✓ Found menuitem: "${text}" (role: ${item.getAttribute('role')})`);
+              item.setAttribute('data-report-item-found', 'true');
+              return item;
+            }
+          }
+          
+          // PRIORITY 2: Search through all elements if menuitem not found
+          console.log('   Strategy 2: Searching all elements...');
           const allElements = Array.from(document.querySelectorAll('*'));
           
           for (const el of allElements) {
@@ -1277,15 +1291,19 @@ class AutomationService {
               let clickable = el;
               let depth = 0;
               while (clickable && depth < 10) {
+                const role = clickable.getAttribute('role');
                 if (
                   clickable.tagName === 'BUTTON' ||
                   clickable.tagName === 'A' ||
-                  clickable.getAttribute('role') === 'menuitem' ||
-                  clickable.getAttribute('role') === 'option' ||
+                  role === 'menuitemradio' ||
+                  role === 'menuitem' ||
+                  role === 'option' ||
                   clickable.onclick ||
                   clickable.getAttribute('jsaction') ||
                   (clickable.style && window.getComputedStyle(clickable).cursor === 'pointer')
                 ) {
+                  console.log(`   ✓ Found clickable parent: ${clickable.tagName} (role: ${role || 'none'})`);
+                  clickable.setAttribute('data-report-item-found', 'true');
                   return clickable;
                 }
                 clickable = clickable.parentElement;
@@ -1293,6 +1311,8 @@ class AutomationService {
               }
               
               // If no clickable parent found, return the element itself
+              console.log(`   ⚠️ No clickable parent, using element itself`);
+              el.setAttribute('data-report-item-found', 'true');
               return el;
             }
           }
@@ -1302,6 +1322,12 @@ class AutomationService {
         const isValid = await reportOption.evaluate(el => el !== null);
         if (isValid) {
           console.log('✅ Found report option via broad text search');
+          // Re-query to get fresh element handle with the marker attribute
+          const markedElement = await page.$('[data-report-item-found="true"]');
+          if (markedElement) {
+            reportOption = markedElement;
+            console.log('   ✓ Re-queried element with data-report-item-found attribute');
+          }
         } else {
           reportOption = null;
         }
@@ -1318,11 +1344,81 @@ class AutomationService {
         throw new Error('Could not find report option in menu');
       }
 
-      // Click report option
+      // Click report option (try multiple methods)
       console.log('🖱️ Clicking report option...');
-      await reportOption.click();
-      console.log('   ⏳ Waiting for report dialog to open...');
-      await this.delay(4000); // Increased delay for report dialog to fully load
+      
+      let reportDialogOpened = false;
+      
+      // Method 1: Standard click
+      try {
+        await reportOption.click();
+        await this.delay(2000);
+        
+        // Check if dialog appeared
+        const dialogVisible = await page.evaluate(() => {
+          const dialogs = document.querySelectorAll('[role="dialog"], [role="alertdialog"], .VfPpkd-cnG4Wd');
+          return dialogs.length > 0;
+        });
+        
+        if (dialogVisible) {
+          console.log('   ✅ Report dialog opened after standard click');
+          reportDialogOpened = true;
+        }
+      } catch (e) {
+        console.log('   ⚠️ Standard click failed:', e.message);
+      }
+      
+      // Method 2: JavaScript click if standard failed
+      if (!reportDialogOpened) {
+        console.log('   Trying JavaScript click...');
+        try {
+          await page.evaluate(el => el.click(), reportOption);
+          await this.delay(2000);
+          
+          const dialogVisible = await page.evaluate(() => {
+            const dialogs = document.querySelectorAll('[role="dialog"], [role="alertdialog"]');
+            return dialogs.length > 0;
+          });
+          
+          if (dialogVisible) {
+            console.log('   ✅ Report dialog opened after JavaScript click');
+            reportDialogOpened = true;
+          }
+        } catch (e) {
+          console.log('   ⚠️ JavaScript click failed:', e.message);
+        }
+      }
+      
+      // Method 3: Dispatch click event
+      if (!reportDialogOpened) {
+        console.log('   Trying dispatch click event...');
+        try {
+          await page.evaluate(el => {
+            const event = new MouseEvent('click', {
+              view: window,
+              bubbles: true,
+              cancelable: true
+            });
+            el.dispatchEvent(event);
+          }, reportOption);
+          await this.delay(2000);
+          
+          const dialogVisible = await page.evaluate(() => {
+            const dialogs = document.querySelectorAll('[role="dialog"], [role="alertdialog"]');
+            return dialogs.length > 0;
+          });
+          
+          if (dialogVisible) {
+            console.log('   ✅ Report dialog opened after dispatch event');
+            reportDialogOpened = true;
+          }
+        } catch (e) {
+          console.log('   ⚠️ Dispatch event failed:', e.message);
+        }
+      }
+      
+      console.log('   ⏳ Waiting for report dialog to fully load...');
+      await this.delay(2000);
 
       // Debug: Show all available report reasons
       console.log('🔍 Debugging available report reasons...');
