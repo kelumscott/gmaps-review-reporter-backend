@@ -1418,7 +1418,27 @@ class AutomationService {
       }
       
       console.log('   ⏳ Waiting for report dialog to fully load...');
-      await this.delay(2000);
+      await this.delay(3000); // Increased from 2s to 3s
+      
+      // Extra check: Wait for dialog to have content
+      console.log('   ⏳ Waiting for dialog content to appear...');
+      try {
+        await page.waitForFunction(() => {
+          const dialogs = document.querySelectorAll('[role="dialog"], [role="alertdialog"]');
+          if (dialogs.length === 0) return false;
+          
+          const lastDialog = dialogs[dialogs.length - 1];
+          // Check if dialog has labels or buttons
+          const hasLabels = lastDialog.querySelectorAll('label').length > 0;
+          const hasButtons = lastDialog.querySelectorAll('button').length > 0;
+          const hasRadios = lastDialog.querySelectorAll('[role="radio"]').length > 0;
+          
+          return hasLabels || hasButtons || hasRadios;
+        }, { timeout: 10000 });
+        console.log('   ✅ Dialog content loaded');
+      } catch (waitError) {
+        console.log('   ⚠️ Timeout waiting for dialog content, continuing anyway...');
+      }
 
       // Debug: Show all available report reasons
       console.log('🔍 Debugging available report reasons...');
@@ -1427,16 +1447,35 @@ class AutomationService {
           const reasons = [];
           
           // IMPORTANT: Search ONLY inside the report dialog, not the entire page!
-          const dialog = document.querySelector('[role="dialog"], [role="alertdialog"], .VfPpkd-cnG4Wd');
+          // Try multiple dialog selectors
+          const allDialogs = document.querySelectorAll('[role="dialog"], [role="alertdialog"], .VfPpkd-cnG4Wd');
+          console.log(`   🔍 Found ${allDialogs.length} dialog(s) on page`);
           
-          if (!dialog) {
+          if (allDialogs.length === 0) {
             console.log('   ⚠️ No dialog found on page!');
             return [];
           }
           
-          console.log('   ✓ Found dialog, searching inside it...');
+          // Use the LAST dialog (most recently opened)
+          const dialog = allDialogs[allDialogs.length - 1];
+          console.log(`   ✓ Using dialog #${allDialogs.length} (last/most recent)`);
+          
+          // Debug: Show what's in the dialog
+          const dialogHTML = dialog.innerHTML;
+          console.log(`   📄 Dialog HTML length: ${dialogHTML.length} chars`);
+          console.log(`   📄 Dialog text content: "${dialog.textContent?.substring(0, 200)}..."`);
+          
+          // Count elements inside dialog
+          const allInside = dialog.querySelectorAll('*');
+          console.log(`   📊 Dialog contains ${allInside.length} elements total`);
           
           // Look for radio buttons, labels, and clickable elements INSIDE the dialog
+          console.log(`   🔍 Searching for: labels, radios, options...`);
+          const labelCount = dialog.querySelectorAll('label').length;
+          const radioCount = dialog.querySelectorAll('[role="radio"]').length;
+          const buttonCount = dialog.querySelectorAll('button').length;
+          console.log(`   📊 Found: ${labelCount} labels, ${radioCount} radios, ${buttonCount} buttons`);
+          
           const elements = Array.from(dialog.querySelectorAll([
             'label',
             '[role="radio"]',
@@ -1464,6 +1503,38 @@ class AutomationService {
           return reasons;
         });
         console.log('📋 Available report reasons:', JSON.stringify(availableReasons, null, 2));
+        
+        // If no reasons found, try to debug what went wrong
+        if (availableReasons.length === 0) {
+          console.log('⚠️ No report reasons found! Checking for issues...');
+          
+          // Check if dialog might be in an iframe
+          const iframeCheck = await page.evaluate(() => {
+            const iframes = document.querySelectorAll('iframe');
+            return {
+              iframeCount: iframes.length,
+              iframeUrls: Array.from(iframes).map(f => f.src).slice(0, 3)
+            };
+          });
+          console.log(`   📊 Iframes on page: ${iframeCheck.iframeCount}`);
+          if (iframeCheck.iframeCount > 0) {
+            console.log(`   📋 Iframe URLs: ${JSON.stringify(iframeCheck.iframeUrls)}`);
+          }
+          
+          // Check what dialogs exist and what's in them
+          const dialogInfo = await page.evaluate(() => {
+            const dialogs = document.querySelectorAll('[role="dialog"], [role="alertdialog"]');
+            return Array.from(dialogs).map((d, i) => ({
+              index: i,
+              textContent: d.textContent?.substring(0, 300),
+              buttonCount: d.querySelectorAll('button').length,
+              labelCount: d.querySelectorAll('label').length,
+              inputCount: d.querySelectorAll('input').length,
+              className: d.className?.substring(0, 100)
+            }));
+          });
+          console.log(`   📋 All dialogs info:`, JSON.stringify(dialogInfo, null, 2));
+        }
       } catch (debugError) {
         console.log('⚠️ Could not debug report reasons:', debugError.message);
       }
