@@ -41,7 +41,7 @@ const supabase = createClient(
   process.env.SUPABASE_ANON_KEY || ''
 );
 
-const { AutomationService } = require('./automation-service-api');
+const AutomationService = require('./automation-service-api');
 const oauthHandler = require('./oauth-handler');
 const legalFormHandler = require('./legal-form-handler');
 const openaiHandler = require('./openai-handler');
