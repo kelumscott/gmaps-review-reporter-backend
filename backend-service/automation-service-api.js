@@ -659,25 +659,31 @@ class AutomationService {
       }
 
       console.log('   ⏳ Waiting for page to stabilize...');
-      await this.delay(5000); // Give page more time to fully render
+      await this.delay(8000); // Give page more time to fully render (increased from 5000)
 
       // Debug: Check what's on the page
       console.log('🔍 Checking page content...');
       const pageInfo = await page.evaluate(() => {
+        const buttons = Array.from(document.querySelectorAll('button'));
         return {
           url: window.location.href,
           title: document.title,
-          hasButtons: document.querySelectorAll('button').length,
-          hasAriaLabels: document.querySelectorAll('[aria-label]').length
+          hasButtons: buttons.length,
+          hasAriaLabels: document.querySelectorAll('[aria-label]').length,
+          // Check if it's REALLY the minimal collapse-only page
+          isCollapseOnly: buttons.length === 1 && 
+                         buttons[0].innerText?.includes('Collapse side panel'),
+          firstButtonText: buttons[0]?.innerText?.trim() || ''
         };
       });
       console.log('📄 Page info:', JSON.stringify(pageInfo, null, 2));
 
       // ═══════════════════════════════════════════════════════════
       // CRITICAL FIX: Check if we're on the minimal/API page
+      // Only navigate if it's TRULY minimal (collapse-only button)
       // ═══════════════════════════════════════════════════════════
-      if (pageInfo.hasButtons <= 3) {
-        console.log('⚠️ DETECTED MINIMAL PAGE - Only', pageInfo.hasButtons, 'buttons found');
+      if (pageInfo.isCollapseOnly || (pageInfo.hasButtons === 1 && pageInfo.firstButtonText.includes('Collapse'))) {
+        console.log('⚠️ DETECTED MINIMAL PAGE - Only has "Collapse side panel" button');
         console.log('🔄 This appears to be the API/data page, not the full review page');
         console.log('🔄 Attempting to navigate to full review page...');
         
@@ -766,13 +772,13 @@ class AutomationService {
         
         // Strategy 3: Construct direct review URL if we have IDs
         if (!fullPageLink && reviewId) {
-          console.log('   🔍 Strategy 3: Constructing direct review URL...');
+          console.log('   🔍 Strategy 3: Constructing direct place page URL...');
           
           // Try constructing different URL formats
+          // NOTE: Skip /contrib/ URLs as they show the contributor's profile menu, not review menu
           const urlFormats = [
-            `https://www.google.com/maps/contrib/${reviewId}`,
-            `https://www.google.com/maps/@?cid=${reviewId}`,
-            placeId ? `https://www.google.com/maps/place/?q=place_id:${placeId}` : null
+            placeId ? `https://www.google.com/maps/place/?q=place_id:${placeId}` : null,
+            // Don't use: `https://www.google.com/maps/contrib/${reviewId}` - shows wrong menu
           ].filter(Boolean);
           
           for (const url of urlFormats) {
