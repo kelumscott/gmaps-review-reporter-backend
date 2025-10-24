@@ -6,6 +6,8 @@
  * 
  * It exports an AutomationService class that can be instantiated and controlled
  * programmatically by the Express.js server.
+ * 
+ * FIXED: ERR_NO_SUPPORTED_PROXIES - Now uses page.authenticate() for proxy auth
  */
 
 // Use puppeteer-extra with stealth plugin for better bot detection evasion
@@ -59,6 +61,7 @@ class AutomationService {
     this.pollInterval = null;
     this.currentReview = null;
     this.startedAt = null;
+    this.proxyCredentials = null; // FIXED: Store proxy credentials for page.authenticate()
     this.stats = {
       totalProcessed: 0,
       successful: 0,
@@ -116,20 +119,20 @@ class AutomationService {
       console.log('🌐 Using @sparticuz/chromium for Render');
       console.log(`   Executable: ${await chromium.executablePath()}`);
 
-      // Add proxy if configured
+      // FIXED: Add proxy if configured (without credentials in URL)
       if (proxyConfig) {
-        const proxyUrl = this.buildProxyUrl(proxyConfig);
+        const { proxyUrl, username, password } = this.buildProxyUrl(proxyConfig);
         launchOptions.args.push(`--proxy-server=${proxyUrl}`);
         console.log(`🌍 Using proxy: ${proxyConfig.protocol}://${proxyConfig.proxy_address}:${proxyConfig.port}`);
         console.log(`   Location: ${proxyConfig.location}, Session: ${proxyConfig.session_type}`);
         
-        // Debug: Check if credentials exist (without logging actual values)
-        const hasUsername = proxyConfig.username && proxyConfig.username.length > 0;
-        const hasPassword = proxyConfig.password && proxyConfig.password.length > 0;
-        console.log(`   🔐 Credentials: Username=${hasUsername ? '✅' : '❌'}, Password=${hasPassword ? '✅' : '❌'}`);
-        
-        if (!hasUsername || !hasPassword) {
-          console.error(`❌ PROXY ERROR: Missing credentials! Username: ${hasUsername}, Password: ${hasPassword}`);
+        // FIXED: Store credentials for page.authenticate()
+        if (username && password) {
+          this.proxyCredentials = { username, password };
+          console.log(`   🔐 Proxy credentials stored for authentication`);
+          console.log(`   👤 Username: ${username}`);
+        } else {
+          console.error(`❌ PROXY ERROR: Missing credentials!`);
         }
       }
 
@@ -189,6 +192,10 @@ class AutomationService {
 
   /**
    * Build proxy URL from configuration with session-based IP rotation
+   * 
+   * FIXED: Chromium doesn't support credentials in --proxy-server arg
+   * We return the URL WITHOUT credentials and the credentials separately
+   * The credentials must be used with page.authenticate()
    */
   buildProxyUrl(proxyConfig) {
     const { 
@@ -220,17 +227,19 @@ class AutomationService {
       console.log(`🌐 Using rotating IP with session: session${session_counter}`);
     }
     
-    // URL encode password to handle special characters
-    const encodedPassword = encodeURIComponent(password);
+    // FIXED: Build proxy URL WITHOUT credentials (Chromium requirement)
+    // Credentials will be provided via page.authenticate()
+    const proxyUrl = `${protocolPrefix}://${proxy_address}:${port}`;
     
-    // Build proxy URL
-    const proxyUrl = `${protocolPrefix}://${finalUsername}:${encodedPassword}@${proxy_address}:${port}`;
+    console.log(`   🔗 Proxy server: ${proxyUrl}`);
+    console.log(`   🔐 Auth will use: ${finalUsername}:${'*'.repeat(password.length)}`);
     
-    // Debug: Log masked URL
-    const maskedUrl = `${protocolPrefix}://${finalUsername}:${'*'.repeat(8)}@${proxy_address}:${port}`;
-    console.log(`   🔗 Proxy URL (masked): ${maskedUrl}`);
-    
-    return proxyUrl;
+    // FIXED: Return object with URL and credentials separated
+    return {
+      proxyUrl,
+      username: finalUsername,
+      password: password
+    };
   }
 
   /**
@@ -934,6 +943,16 @@ class AutomationService {
 
       // Create a new page (puppeteer-core doesn't support createIncognitoBrowserContext with chromium)
       page = await browser.newPage();
+
+      // FIXED: Authenticate with proxy if credentials are available
+      if (this.proxyCredentials) {
+        console.log(`🔐 Authenticating with proxy...`);
+        await page.authenticate({
+          username: this.proxyCredentials.username,
+          password: this.proxyCredentials.password
+        });
+        console.log(`✅ Proxy authentication configured`);
+      }
 
       // Set viewport
       await page.setViewport({ width: 1920, height: 1080 });
