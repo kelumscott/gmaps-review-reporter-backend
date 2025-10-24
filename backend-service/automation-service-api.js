@@ -1426,8 +1426,18 @@ class AutomationService {
         const availableReasons = await page.evaluate(() => {
           const reasons = [];
           
-          // Look for radio buttons, labels, and clickable elements
-          const elements = Array.from(document.querySelectorAll([
+          // IMPORTANT: Search ONLY inside the report dialog, not the entire page!
+          const dialog = document.querySelector('[role="dialog"], [role="alertdialog"], .VfPpkd-cnG4Wd');
+          
+          if (!dialog) {
+            console.log('   ⚠️ No dialog found on page!');
+            return [];
+          }
+          
+          console.log('   ✓ Found dialog, searching inside it...');
+          
+          // Look for radio buttons, labels, and clickable elements INSIDE the dialog
+          const elements = Array.from(dialog.querySelectorAll([
             'label',
             '[role="radio"]',
             '[role="option"]',
@@ -1465,10 +1475,17 @@ class AutomationService {
         // Try to find and click the reason option
         let reasonClicked = false;
         
-        // Strategy 1: Find by exact text match (case-sensitive)
-        console.log('   🔍 Strategy 1: Exact text match');
+        // Strategy 1: Find by exact text match (case-sensitive) INSIDE DIALOG
+        console.log('   🔍 Strategy 1: Exact text match (inside dialog)');
         const exactTextResult = await page.evaluate((reason) => {
-          const allElements = Array.from(document.querySelectorAll('*'));
+          // Search ONLY inside dialog
+          const dialog = document.querySelector('[role="dialog"], [role="alertdialog"], .VfPpkd-cnG4Wd');
+          if (!dialog) {
+            console.log('   ⚠️ No dialog found for reason search');
+            return { success: false };
+          }
+          
+          const allElements = Array.from(dialog.querySelectorAll('*'));
           for (const el of allElements) {
             const text = (el.innerText || el.textContent || '').trim();
             if (text === reason) {
@@ -1532,11 +1549,19 @@ class AutomationService {
           }
         }
         
-        // Strategy 3: Find radio button with matching text in parent/sibling
+        // Strategy 3: Find radio button with matching text in parent/sibling (inside dialog)
         if (!reasonClicked) {
-          console.log('   🔍 Strategy 3: Radio button with matching sibling text');
+          console.log('   🔍 Strategy 3: Radio button with matching sibling text (inside dialog)');
           const radioClicked = await page.evaluate((reason) => {
-            const radios = Array.from(document.querySelectorAll('[role="radio"], input[type="radio"]'));
+            // Search ONLY inside dialog
+            const dialog = document.querySelector('[role="dialog"], [role="alertdialog"], .VfPpkd-cnG4Wd');
+            if (!dialog) {
+              console.log('   ⚠️ No dialog found');
+              return false;
+            }
+            
+            const radios = Array.from(dialog.querySelectorAll('[role="radio"], input[type="radio"]'));
+            console.log(`   Found ${radios.length} radio buttons in dialog`);
             
             for (const radio of radios) {
               // Check parent and sibling text
@@ -1567,14 +1592,23 @@ class AutomationService {
         }
       }
 
-      // Debug: Show all buttons in the report dialog
-      console.log('🔍 Debugging buttons in report dialog...');
+      // Debug: Show all buttons INSIDE the report dialog
+      console.log('🔍 Debugging buttons inside report dialog...');
       try {
         const dialogButtons = await page.evaluate(() => {
-          const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
-          return buttons.slice(0, 30).map((btn, i) => ({
+          // Search ONLY inside dialog
+          const dialog = document.querySelector('[role="dialog"], [role="alertdialog"], .VfPpkd-cnG4Wd');
+          if (!dialog) {
+            console.log('   ⚠️ No dialog found for button debug');
+            return [];
+          }
+          
+          const buttons = Array.from(dialog.querySelectorAll('button, [role="button"]'));
+          console.log(`   Found ${buttons.length} buttons in dialog`);
+          
+          return buttons.map((btn, i) => ({
             index: i,
-            text: (btn.innerText || btn.textContent || '').substring(0, 100),
+            text: (btn.innerText || btn.textContent || '').substring(0, 100).trim(),
             ariaLabel: btn.getAttribute('aria-label') || '',
             type: btn.getAttribute('type') || '',
             className: btn.className?.substring(0, 100) || ''
@@ -1585,71 +1619,75 @@ class AutomationService {
         console.log('⚠️ Could not debug dialog buttons:', debugError.message);
       }
 
-      // Submit the report
-      console.log('🔍 Looking for submit button...');
-      const submitXPaths = [
-        "//button[contains(translate(text(), 'SUBMIT', 'submit'), 'submit')]",
-        "//button[contains(translate(text(), 'SEND', 'send'), 'send')]", 
-        "//button[contains(translate(text(), 'FLAG', 'flag'), 'flag')]",
-        "//span[contains(translate(text(), 'SUBMIT', 'submit'), 'submit')]/ancestor::button",
-        "//span[contains(translate(text(), 'SEND', 'send'), 'send')]/ancestor::button",
-        "//*[contains(@aria-label, 'Submit')]",
-        "//*[contains(@aria-label, 'Send')]",
-        "//button[@type='submit']"
-      ];
-
+      // Submit the report (NO XPATH - CSS selectors only, scoped to dialog)
+      console.log('🔍 Looking for submit button inside dialog...');
+      
       let submitted = false;
-      for (const xpath of submitXPaths) {
-        try {
-          console.log(`   🔍 Trying XPath: ${xpath}`);
-          const elements = await page.$x(xpath);
-          if (elements.length > 0) {
-            console.log(`   ✅ Found ${elements.length} element(s), clicking first one`);
-            await elements[0].click();
-            console.log('✅ Report submitted successfully');
-            await this.delay(3000);
-            submitted = true;
-            break;
-          }
-        } catch (e) {
-          console.log(`   ⚠️ XPath failed: ${e.message}`);
-          continue;
+      
+      // Find submit button INSIDE the dialog
+      const submitButton = await page.evaluateHandle(() => {
+        // Search ONLY inside dialog
+        const dialog = document.querySelector('[role="dialog"], [role="alertdialog"], .VfPpkd-cnG4Wd');
+        if (!dialog) {
+          console.log('   ⚠️ No dialog found for submit button search');
+          return null;
         }
-      }
-
-      if (!submitted) {
-        // Try finding any button that looks like a submit button
-        console.log('🔍 Trying alternative button detection...');
-        const submitButton = await page.evaluateHandle(() => {
-          const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
-          for (const btn of buttons) {
-            const text = (btn.innerText || btn.textContent || '').toLowerCase();
-            const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
-            const type = btn.getAttribute('type') || '';
-            
-            // Look for submit-related keywords
-            if (
-              text.includes('submit') ||
-              text.includes('send') ||
-              text.includes('flag') ||
-              text.includes('report') ||
-              ariaLabel.includes('submit') ||
-              ariaLabel.includes('send') ||
-              type === 'submit'
-            ) {
-              // Exclude cancel/close buttons
-              if (!text.includes('cancel') && !text.includes('close') && !text.includes('back')) {
-                return btn;
-              }
+        
+        console.log('   ✓ Searching for submit button inside dialog...');
+        const buttons = Array.from(dialog.querySelectorAll('button, [role="button"]'));
+        console.log(`   Found ${buttons.length} buttons in dialog`);
+        
+        for (const btn of buttons) {
+          const text = (btn.innerText || btn.textContent || '').toLowerCase().trim();
+          const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
+          const type = btn.getAttribute('type') || '';
+          
+          console.log(`   Button: "${text}" (aria: "${ariaLabel}", type: "${type}")`);
+          
+          // Look for submit-related keywords
+          if (
+            text.includes('submit') ||
+            text.includes('send') ||
+            text.includes('flag') ||
+            text.includes('report') ||
+            text === 'next' ||
+            text === 'continue' ||
+            ariaLabel.includes('submit') ||
+            ariaLabel.includes('send') ||
+            ariaLabel.includes('next') ||
+            type === 'submit'
+          ) {
+            // Exclude cancel/close/back buttons
+            if (!text.includes('cancel') && !text.includes('close') && !text.includes('back')) {
+              console.log(`   ✓ Found potential submit button: "${text}"`);
+              btn.setAttribute('data-submit-button-found', 'true');
+              return btn;
             }
           }
-          return null;
-        });
+        }
         
-        const isValid = await submitButton.evaluate(el => el !== null);
-        if (isValid) {
-          console.log('✅ Found submit button via alternative detection');
-          await submitButton.click();
+        // Fallback: Last button in dialog (usually submit)
+        if (buttons.length > 0) {
+          const lastButton = buttons[buttons.length - 1];
+          const lastText = (lastButton.innerText || lastButton.textContent || '').toLowerCase().trim();
+          if (!lastText.includes('cancel') && !lastText.includes('close')) {
+            console.log(`   ⚠️ Using last button as fallback: "${lastText}"`);
+            lastButton.setAttribute('data-submit-button-found', 'true');
+            return lastButton;
+          }
+        }
+        
+        return null;
+      });
+      
+      const isValid = await submitButton.evaluate(el => el !== null);
+      if (isValid) {
+        console.log('✅ Found submit button');
+        
+        // Re-query to get fresh element handle
+        const freshButton = await page.$('[data-submit-button-found="true"]');
+        if (freshButton) {
+          await freshButton.click();
           console.log('✅ Report submitted successfully');
           await this.delay(3000);
           submitted = true;
