@@ -221,61 +221,104 @@ class AutomationService {
   }
 
   /**
-   * Get next available Gmail account with legal intervals
+   * Get next available Gmail account with legal intervals (ENHANCED - handles missing oauth_status)
    */
   async getNextGmailAccount() {
     console.log('📧 Fetching next Gmail account...');
 
     const cooldownTime = new Date(Date.now() - REPORT_COOLDOWN_HOURS * 60 * 60 * 1000);
 
-    const { data, error } = await supabase
-      .from('gmail_accounts')
-      .select('*')
-      .or(`last_used.is.null,last_used.lt.${cooldownTime.toISOString()}`)
-      .eq('oauth_status', 'authorized')
-      .order('last_used', { ascending: true, nullsFirst: true })
-      .limit(1);
+    try {
+      // Try with oauth_status filter first
+      let query = supabase
+        .from('gmail_accounts')
+        .select('*')
+        .or(`last_used.is.null,last_used.lt.${cooldownTime.toISOString()}`)
+        .order('last_used', { ascending: true, nullsFirst: true })
+        .limit(1);
+      
+      // Try to filter by oauth_status
+      try {
+        const { data, error } = await query.eq('oauth_status', 'authorized');
+        
+        if (error) {
+          // If error mentions oauth_status column, fetch without it
+          if (error.message && error.message.includes('oauth_status')) {
+            console.log('   ℹ️  oauth_status column not found, fetching any account...');
+            const { data: allData, error: allError } = await supabase
+              .from('gmail_accounts')
+              .select('*')
+              .or(`last_used.is.null,last_used.lt.${cooldownTime.toISOString()}`)
+              .order('last_used', { ascending: true, nullsFirst: true })
+              .limit(1);
+            
+            if (allError) throw allError;
+            
+            if (!allData || allData.length === 0) {
+              throw new Error('No available Gmail accounts (all in cooldown)');
+            }
+            
+            console.log(`✅ Selected Gmail account: ${allData[0].email}`);
+            return allData[0];
+          }
+          throw error;
+        }
+        
+        if (!data || data.length === 0) {
+          throw new Error('No available Gmail accounts (all in cooldown or not authorized)');
+        }
 
-    if (error) {
+        console.log(`✅ Selected Gmail account: ${data[0].email}`);
+        return data[0];
+      } catch (statusError) {
+        console.error('❌ Error fetching Gmail account:', statusError);
+        throw statusError;
+      }
+    } catch (error) {
       console.error('Error fetching Gmail account:', error);
       throw new Error(`Failed to get Gmail account: ${error.message}`);
     }
-
-    if (!data || data.length === 0) {
-      throw new Error('No available Gmail accounts (all in cooldown or not authorized)');
-    }
-
-    console.log(`✅ Selected Gmail account: ${data[0].email}`);
-    return data[0];
   }
 
   /**
-   * Update review status (ENHANCED - handles missing updated_at column)
+   * Update review status (ENHANCED - handles missing columns)
    */
   async updateReviewStatus(reviewId, status, gmailAccountId = null, errorMessage = null) {
     try {
       const updateData = {
         status,
-        gmail_account_id: gmailAccountId,
-        error_message: errorMessage
+        gmail_account_id: gmailAccountId
       };
       
-      // Try to add updated_at - if column doesn't exist, query will fail
-      // We'll catch it and retry without updated_at
+      // Try to add optional columns - remove them if they cause errors
       try {
+        // Add error_message if provided
+        if (errorMessage) {
+          updateData.error_message = errorMessage;
+        }
+        
+        // Add updated_at timestamp
         updateData.updated_at = new Date().toISOString();
+        
         const { error } = await supabase
           .from('reviews')
           .update(updateData)
           .eq('id', reviewId);
         
         if (error) {
-          // If error mentions updated_at, retry without it
-          if (error.message && error.message.includes('updated_at')) {
-            delete updateData.updated_at;
+          // If error mentions missing columns, retry without them
+          if (error.message && (error.message.includes('updated_at') || error.message.includes('error_message'))) {
+            console.log('   ℹ️  Some columns missing, retrying with basic fields...');
+            
+            // Retry with just status and gmail_account_id
+            const basicData = {
+              status,
+              gmail_account_id: gmailAccountId
+            };
+            
             const { error: retryError } = await supabase
               .from('reviews')
-              .update(updateData)
+              .update(basicData)
               .eq('id', reviewId);
             
             if (retryError) throw retryError;
