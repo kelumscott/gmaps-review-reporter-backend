@@ -8,6 +8,7 @@
  * programmatically by the Express.js server.
  * 
  * FIXED: ERR_NO_SUPPORTED_PROXIES - Now uses page.authenticate() for proxy auth
+ * ADDED: Comprehensive diagnostics for page loading issues
  */
 
 // Use puppeteer-extra with stealth plugin for better bot detection evasion
@@ -507,6 +508,180 @@ class AutomationService {
       });
       console.log('📄 Page info:', JSON.stringify(pageInfo, null, 2));
 
+      // ═══════════════════════════════════════════════════════════════════════
+      // 🔍 DIAGNOSTIC MODE - Check what Google is actually showing
+      // ═══════════════════════════════════════════════════════════════════════
+      console.log('');
+      console.log('═══════════════════════════════════════════════════════');
+      console.log('🔍 DIAGNOSTIC MODE: Analyzing page content...');
+      console.log('═══════════════════════════════════════════════════════');
+      
+      try {
+        // 1. Get full page HTML
+        const fullHTML = await page.content();
+        console.log('📄 Total HTML length:', fullHTML.length, 'characters');
+        console.log('📄 First 1000 characters of HTML:');
+        console.log(fullHTML.substring(0, 1000));
+        console.log('...');
+        
+        // 2. Check for common Google blocking patterns
+        const htmlLower = fullHTML.toLowerCase();
+        
+        if (htmlLower.includes('unusual traffic') || htmlLower.includes('automated requests')) {
+          console.log('');
+          console.log('🚨 DETECTION: Google "Unusual Traffic" block page!');
+          console.log('   Google is detecting automation/proxy usage');
+          console.log('   Recommendations:');
+          console.log('   1. Switch to residential proxy (not datacenter)');
+          console.log('   2. Enable CapSolver for CAPTCHA solving');
+          console.log('   3. Add longer delays between requests');
+          console.log('');
+        }
+        
+        if (htmlLower.includes('captcha') || htmlLower.includes('recaptcha')) {
+          console.log('');
+          console.log('🚨 DETECTION: CAPTCHA challenge present!');
+          console.log('   Google is requiring CAPTCHA verification');
+          console.log('   Recommendation: Enable CapSolver integration');
+          console.log('');
+        }
+        
+        if (fullHTML.length < 5000) {
+          console.log('');
+          console.log('⚠️  WARNING: HTML is very short (< 5000 chars)');
+          console.log('   This usually means:');
+          console.log('   - Page didn\'t load properly');
+          console.log('   - Proxy is being blocked');
+          console.log('   - JavaScript didn\'t execute');
+          console.log('');
+        }
+        
+        // 3. Get detailed page metrics
+        const pageMetrics = await page.evaluate(() => {
+          const bodyText = document.body?.innerText || '';
+          return {
+            totalElements: document.querySelectorAll('*').length,
+            buttons: document.querySelectorAll('button').length,
+            divs: document.querySelectorAll('div').length,
+            links: document.querySelectorAll('a').length,
+            images: document.querySelectorAll('img').length,
+            iframes: document.querySelectorAll('iframe').length,
+            bodyTextLength: bodyText.length,
+            bodyTextPreview: bodyText.substring(0, 300),
+            hasGoogleMapsMarkers: !!document.querySelector('[role="img"][aria-label*="Google"]'),
+            hasMapContainer: !!document.querySelector('[role="main"]'),
+            scripts: document.querySelectorAll('script').length
+          };
+        });
+        
+        console.log('📊 Page Metrics:');
+        console.log('   Total DOM elements:', pageMetrics.totalElements);
+        console.log('   Buttons found:', pageMetrics.buttons);
+        console.log('   Divs found:', pageMetrics.divs);
+        console.log('   Links found:', pageMetrics.links);
+        console.log('   Images found:', pageMetrics.images);
+        console.log('   Iframes found:', pageMetrics.iframes);
+        console.log('   Scripts loaded:', pageMetrics.scripts);
+        console.log('   Body text length:', pageMetrics.bodyTextLength);
+        console.log('');
+        console.log('📝 Body text preview:');
+        console.log(pageMetrics.bodyTextPreview || '(empty)');
+        console.log('');
+        
+        if (pageMetrics.totalElements < 50) {
+          console.log('🚨 CRITICAL: Very few DOM elements (< 50)!');
+          console.log('   The page is essentially empty.');
+          console.log('   This is NOT a selector issue - the page isn\'t loading at all.');
+          console.log('');
+        }
+        
+        // 4. Try waiting longer for JavaScript execution
+        console.log('⏳ Waiting additional 15 seconds for JavaScript to fully execute...');
+        await this.delay(15000);
+        
+        // 5. Check again after waiting
+        const afterWait = await page.evaluate(() => {
+          return {
+            buttons: document.querySelectorAll('button').length,
+            totalElements: document.querySelectorAll('*').length,
+            title: document.title,
+            url: window.location.href
+          };
+        });
+        
+        console.log('📊 After 15-second wait:');
+        console.log('   Buttons:', afterWait.buttons);
+        console.log('   Total elements:', afterWait.totalElements);
+        console.log('   Title:', afterWait.title || '(no title)');
+        console.log('   Final URL:', afterWait.url);
+        console.log('');
+        
+        if (afterWait.buttons > 0) {
+          console.log('✅ Good news! Buttons appeared after waiting longer.');
+          console.log('   Solution: Increase delay time in code.');
+        } else {
+          console.log('❌ Still no buttons after 15 seconds.');
+          console.log('   This indicates a deeper issue:');
+          console.log('   - Proxy being blocked by Google');
+          console.log('   - CAPTCHA/security challenge');
+          console.log('   - Invalid/expired review link');
+        }
+        
+        // 6. Take screenshot for visual debugging
+        try {
+          const screenshotPath = '/tmp/google-maps-diagnostic.png';
+          await page.screenshot({ 
+            path: screenshotPath,
+            fullPage: true 
+          });
+          console.log('📸 Screenshot saved to:', screenshotPath);
+          console.log('   (You can download this from Render deployment logs)');
+        } catch (screenshotErr) {
+          console.log('⚠️  Could not save screenshot:', screenshotErr.message);
+        }
+        
+        // 7. Check network requests
+        console.log('🌐 Checking if page made network requests...');
+        const performanceData = await page.evaluate(() => {
+          if (window.performance && window.performance.getEntriesByType) {
+            const resources = window.performance.getEntriesByType('resource');
+            return {
+              totalRequests: resources.length,
+              requestTypes: resources.reduce((acc, r) => {
+                const type = r.initiatorType || 'unknown';
+                acc[type] = (acc[type] || 0) + 1;
+                return acc;
+              }, {})
+            };
+          }
+          return null;
+        });
+        
+        if (performanceData) {
+          console.log('📡 Network activity:');
+          console.log('   Total requests:', performanceData.totalRequests);
+          console.log('   Request breakdown:', JSON.stringify(performanceData.requestTypes, null, 2));
+          
+          if (performanceData.totalRequests < 10) {
+            console.log('⚠️  Very few network requests!');
+            console.log('   Google Maps normally makes 50+ requests.');
+            console.log('   This suggests the page is blocked or not loading properly.');
+          }
+        }
+        
+        console.log('═══════════════════════════════════════════════════════');
+        console.log('🔍 END DIAGNOSTIC MODE');
+        console.log('═══════════════════════════════════════════════════════');
+        console.log('');
+        
+      } catch (diagnosticError) {
+        console.log('❌ Diagnostic mode error:', diagnosticError.message);
+        console.log('   Continuing with normal flow...');
+      }
+      // ═══════════════════════════════════════════════════════════════════════
+      // END OF DIAGNOSTIC CODE
+      // ═══════════════════════════════════════════════════════════════════════
+
       // Look for the three-dot menu button
       console.log('🔍 Searching for three-dot menu button...');
       const menuSelectors = [
@@ -960,12 +1135,22 @@ class AutomationService {
       // Get proxy IP if available
       if (proxyConfig) {
         try {
-          await page.goto('https://api.ipify.org?format=json');
+          console.log('🔍 Verifying proxy IP connection...');
+          await page.goto('https://api.ipify.org?format=json', { 
+            waitUntil: 'networkidle2',
+            timeout: 15000 
+          });
           const ipData = await page.evaluate(() => document.body.textContent);
           proxyIp = JSON.parse(ipData).ip;
           console.log(`🌐 Connected via proxy IP: ${proxyIp}`);
+          console.log(`✅ Proxy is working and allowing connections`);
         } catch (e) {
-          console.log('⚠️ Could not verify proxy IP');
+          console.log('⚠️ Could not verify proxy IP:', e.message);
+          console.log('   This could mean:');
+          console.log('   - Proxy is blocking certain sites');
+          console.log('   - Network connectivity issue');
+          console.log('   - Timeout waiting for response');
+          console.log('   Continuing anyway...');
         }
       }
 
