@@ -1,26 +1,4 @@
 /**
- * ═══════════════════════════════════════════════════════════════════════════
- * COMPLETE automation-service-api.js WITH BOTH FIXES
- * ═══════════════════════════════════════════════════════════════════════════
- * 
- * ✅ Fix 1: Menu Detection - waitForSelector + 12 selectors (lines 732-892)
- * ✅ Fix 2: Review Text Extraction - extractReviewText() + auto-extraction (lines 454-621, 1247-1296)
- * 
- * INSTRUCTIONS:
- * 1. Copy EVERYTHING below this comment block
- * 2. Go to GitHub: backend-service/automation-service-api.js
- * 3. Click "Edit" (pencil icon)
- * 4. Select ALL content (Ctrl+A / Cmd+A)
- * 5. Delete and paste this code
- * 6. Scroll to bottom → "Commit changes"
- * 7. Commit message: "Fix menu detection + add review text extraction"
- * 8. Click "Commit changes"
- * 9. Wait 2-3 minutes for Render auto-deploy
- * 
- * ═══════════════════════════════════════════════════════════════════════════
- */
-
-/**
  * Google Maps Review Reporter - API-Controllable Automation Service
  * 
  * This is a modified version of the automation service that can be controlled
@@ -695,6 +673,153 @@ class AutomationService {
       });
       console.log('📄 Page info:', JSON.stringify(pageInfo, null, 2));
 
+      // ═══════════════════════════════════════════════════════════
+      // CRITICAL FIX: Check if we're on the minimal/API page
+      // ═══════════════════════════════════════════════════════════
+      if (pageInfo.hasButtons <= 3) {
+        console.log('⚠️ DETECTED MINIMAL PAGE - Only', pageInfo.hasButtons, 'buttons found');
+        console.log('🔄 This appears to be the API/data page, not the full review page');
+        console.log('🔄 Attempting to navigate to full review page...');
+        
+        // Extract review ID and construct proper URL
+        const currentUrl = pageInfo.url;
+        
+        // Try to extract the review contribution ID from the URL
+        let reviewId = null;
+        
+        // Pattern 1: Look for contribution ID in the data parameter
+        const dataMatch = currentUrl.match(/!1s([^!]+)/);
+        if (dataMatch) {
+          reviewId = dataMatch[1];
+          console.log(`   ✓ Found review ID: ${reviewId}`);
+        }
+        
+        // Pattern 2: Try to get Place ID
+        const placeIdMatch = currentUrl.match(/!1s0x0:0x([a-f0-9]+)/);
+        let placeId = null;
+        if (placeIdMatch) {
+          placeId = placeIdMatch[1];
+          console.log(`   ✓ Found place ID: ${placeId}`);
+        }
+        
+        // Strategy 1: Try to find the "View on Google Maps" or similar link on the page
+        console.log('   🔍 Strategy 1: Looking for link to full review page...');
+        const fullPageLink = await page.evaluate(() => {
+          // Look for links that might lead to the full page
+          const links = Array.from(document.querySelectorAll('a[href*="/maps/"]'));
+          for (const link of links) {
+            const href = link.getAttribute('href');
+            if (href && !href.includes('/data=') && href.includes('contrib')) {
+              return href;
+            }
+          }
+          return null;
+        });
+        
+        if (fullPageLink) {
+          console.log(`   ✅ Found link to full page: ${fullPageLink}`);
+          const fullUrl = fullPageLink.startsWith('http') ? fullPageLink : `https://www.google.com${fullPageLink}`;
+          console.log(`   🔄 Navigating to: ${fullUrl}`);
+          
+          try {
+            await page.goto(fullUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+            await this.delay(5000);
+            console.log('   ✅ Successfully navigated to full review page');
+          } catch (navError) {
+            console.log('   ⚠️ Failed to navigate to full page:', navError.message);
+          }
+        } else {
+          console.log('   ⚠️ Could not find link to full page');
+        }
+        
+        // Strategy 2: Try clicking elements to expand the view
+        if (!fullPageLink) {
+          console.log('   🔍 Strategy 2: Trying to click elements to expand view...');
+          
+          const clicked = await page.evaluate(() => {
+            // Try clicking profile images, review cards, etc.
+            const clickableSelectors = [
+              '[data-review-id]',
+              '[jsaction*="review"]',
+              'button[aria-label*="review"]',
+              '.review',
+              '[role="article"]'
+            ];
+            
+            for (const selector of clickableSelectors) {
+              const elements = document.querySelectorAll(selector);
+              if (elements.length > 0) {
+                elements[0].click();
+                return true;
+              }
+            }
+            return false;
+          });
+          
+          if (clicked) {
+            console.log('   ✅ Clicked element, waiting for page to update...');
+            await this.delay(5000);
+          } else {
+            console.log('   ⚠️ No clickable elements found to expand view');
+          }
+        }
+        
+        // Strategy 3: Construct direct review URL if we have IDs
+        if (!fullPageLink && reviewId) {
+          console.log('   🔍 Strategy 3: Constructing direct review URL...');
+          
+          // Try constructing different URL formats
+          const urlFormats = [
+            `https://www.google.com/maps/contrib/${reviewId}`,
+            `https://www.google.com/maps/@?cid=${reviewId}`,
+            placeId ? `https://www.google.com/maps/place/?q=place_id:${placeId}` : null
+          ].filter(Boolean);
+          
+          for (const url of urlFormats) {
+            try {
+              console.log(`   🔄 Trying URL format: ${url}`);
+              await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+              await this.delay(5000);
+              
+              // Check if we now have more buttons (successful navigation)
+              const newButtonCount = await page.evaluate(() => document.querySelectorAll('button').length);
+              if (newButtonCount > 5) {
+                console.log(`   ✅ Success! Now have ${newButtonCount} buttons`);
+                break;
+              } else {
+                console.log(`   ⚠️ Still minimal page (${newButtonCount} buttons)`);
+              }
+            } catch (e) {
+              console.log(`   ⚠️ URL format failed:`, e.message);
+            }
+          }
+        }
+        
+        // Final check: See if we're on a better page now
+        const finalCheck = await page.evaluate(() => {
+          return {
+            buttons: document.querySelectorAll('button').length,
+            url: window.location.href
+          };
+        });
+        
+        console.log(`📊 After navigation attempts:`);
+        console.log(`   Buttons: ${finalCheck.buttons}`);
+        console.log(`   URL: ${finalCheck.url}`);
+        
+        if (finalCheck.buttons <= 3) {
+          console.log('⚠️ WARNING: Still on minimal page!');
+          console.log('⚠️ This review link may not support automation.');
+          console.log('💡 TIP: Try using a different review link format from Google Maps');
+          
+          // Don't throw error yet - still try to find menu button in case structure is different
+        } else {
+          console.log('✅ Successfully navigated to full page with UI controls');
+        }
+      } else {
+        console.log('✅ Page has sufficient UI elements (', pageInfo.hasButtons, 'buttons)');
+      }
+
       // Look for the three-dot menu button
       console.log('🔍 Searching for three-dot menu button...');
       const menuSelectors = [
@@ -747,24 +872,167 @@ class AutomationService {
         throw new Error('Could not find three-dot menu button');
       }
 
-      // Click the menu button
-      await menuButton.click();
-      console.log('🖱️ Clicking menu button...');
-      console.log('   ⏳ Waiting for menu to open...');
+      // ═══════════════════════════════════════════════════════════
+      // ENHANCED MENU CLICK - Multiple strategies to bypass bot detection
+      // ═══════════════════════════════════════════════════════════
       
-      // Wait for menu/popup to actually appear (not just blind delay)
+      // Strategy 1: Scroll element into view (more human-like)
+      console.log('🖱️ Step 1: Scrolling menu button into view...');
+      await page.evaluate(el => {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, menuButton);
+      await this.delay(1000);
+      
+      // Strategy 2: Move mouse to button (human-like behavior)
+      console.log('🖱️ Step 2: Moving mouse to button...');
+      const buttonBox = await menuButton.boundingBox();
+      if (buttonBox) {
+        await page.mouse.move(
+          buttonBox.x + buttonBox.width / 2,
+          buttonBox.y + buttonBox.height / 2,
+          { steps: 10 } // Smooth movement
+        );
+        await this.delay(500);
+      }
+      
+      // Strategy 3: Try multiple click methods
+      console.log('🖱️ Step 3: Clicking menu button (trying multiple methods)...');
+      let menuOpened = false;
+      
+      // Method 1: Standard Puppeteer click
+      try {
+        await menuButton.click();
+        console.log('   ✓ Method 1: Standard click executed');
+        await this.delay(2000);
+        
+        // Check if menu appeared
+        const menuVisible = await page.evaluate(() => {
+          const menus = document.querySelectorAll('[role="menu"], [role="listbox"]');
+          for (const menu of menus) {
+            const style = window.getComputedStyle(menu);
+            if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0') {
+              return true;
+            }
+          }
+          return false;
+        });
+        
+        if (menuVisible) {
+          console.log('   ✅ Menu appeared after standard click!');
+          menuOpened = true;
+        }
+      } catch (e) {
+        console.log('   ⚠️ Method 1 failed:', e.message);
+      }
+      
+      // Method 2: JavaScript click if standard click failed
+      if (!menuOpened) {
+        console.log('   Trying Method 2: JavaScript click...');
+        try {
+          await page.evaluate(el => el.click(), menuButton);
+          await this.delay(2000);
+          
+          const menuVisible = await page.evaluate(() => {
+            const menus = document.querySelectorAll('[role="menu"], [role="listbox"]');
+            for (const menu of menus) {
+              const style = window.getComputedStyle(menu);
+              if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0') {
+                return true;
+              }
+            }
+            return false;
+          });
+          
+          if (menuVisible) {
+            console.log('   ✅ Menu appeared after JavaScript click!');
+            menuOpened = true;
+          }
+        } catch (e) {
+          console.log('   ⚠️ Method 2 failed:', e.message);
+        }
+      }
+      
+      // Method 3: Dispatch MouseEvent (most human-like)
+      if (!menuOpened) {
+        console.log('   Trying Method 3: Dispatch MouseEvent...');
+        try {
+          await page.evaluate(el => {
+            const event = new MouseEvent('click', {
+              view: window,
+              bubbles: true,
+              cancelable: true,
+              buttons: 1
+            });
+            el.dispatchEvent(event);
+          }, menuButton);
+          await this.delay(2000);
+          
+          const menuVisible = await page.evaluate(() => {
+            const menus = document.querySelectorAll('[role="menu"], [role="listbox"]');
+            for (const menu of menus) {
+              const style = window.getComputedStyle(menu);
+              if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0') {
+                return true;
+              }
+            }
+            return false;
+          });
+          
+          if (menuVisible) {
+            console.log('   ✅ Menu appeared after MouseEvent!');
+            menuOpened = true;
+          }
+        } catch (e) {
+          console.log('   ⚠️ Method 3 failed:', e.message);
+        }
+      }
+      
+      // Method 4: Double click (last resort)
+      if (!menuOpened) {
+        console.log('   Trying Method 4: Double click...');
+        try {
+          await menuButton.click({ clickCount: 2 });
+          await this.delay(2000);
+          
+          const menuVisible = await page.evaluate(() => {
+            const menus = document.querySelectorAll('[role="menu"], [role="listbox"]');
+            for (const menu of menus) {
+              const style = window.getComputedStyle(menu);
+              if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0') {
+                return true;
+              }
+            }
+            return false;
+          });
+          
+          if (menuVisible) {
+            console.log('   ✅ Menu appeared after double click!');
+            menuOpened = true;
+          }
+        } catch (e) {
+          console.log('   ⚠️ Method 4 failed:', e.message);
+        }
+      }
+      
+      if (!menuOpened) {
+        console.log('   ⚠️ All click methods attempted, menu may not have appeared');
+      }
+      
+      // Wait for menu/popup to fully render
+      console.log('🖱️ Step 4: Waiting for menu to fully render...');
       try {
         await page.waitForSelector('[role="menu"], [role="listbox"], div[jsaction*="click."], [data-menu-id], .menu-popup', {
           visible: true,
-          timeout: 10000
+          timeout: 8000
         });
-        console.log('   ✅ Menu popup appeared');
+        console.log('   ✅ Menu popup detected in DOM');
       } catch (waitError) {
-        console.log('   ⚠️ Menu popup selector not found (continuing anyway...)');
+        console.log('   ⚠️ Menu popup selector not found (continuing to search for items anyway...)');
       }
       
-      // Additional delay for menu items to render
-      await this.delay(6000);
+      // Additional delay for menu items to render (increased from 6 to 8 seconds)
+      console.log('🖱️ Step 5: Waiting for menu items to load...');
+      await this.delay(8000);
 
       // Debug: Log all menu items to see what's available (EXPANDED SEARCH)
       console.log('🔍 Debugging menu items (expanded search)...');
@@ -819,6 +1087,59 @@ class AutomationService {
         console.log(`📋 Available menu items: ${menuItems.length} found`);
         if (menuItems.length > 0) {
           console.log(JSON.stringify(menuItems.slice(0, 10), null, 2)); // Show first 10
+        } else {
+          // No menu items found - additional diagnostics
+          console.log('⚠️ NO MENU ITEMS FOUND - Running deep diagnostics...');
+          
+          // Take screenshot for debugging
+          try {
+            await page.screenshot({ path: '/tmp/no-menu-items-debug.png', fullPage: false });
+            console.log('📸 Screenshot saved: /tmp/no-menu-items-debug.png');
+          } catch (screenshotError) {
+            console.log('⚠️ Could not save screenshot');
+          }
+          
+          // Dump page HTML to see what's actually there
+          try {
+            const pageHTML = await page.evaluate(() => document.body.innerHTML);
+            console.log(`📄 Page HTML length: ${pageHTML.length} characters`);
+            console.log(`📄 HTML preview (first 2000 chars):`);
+            console.log(pageHTML.substring(0, 2000));
+          } catch (htmlError) {
+            console.log('⚠️ Could not get page HTML');
+          }
+          
+          // Check if there are ANY visible elements on the page
+          const visibleElements = await page.evaluate(() => {
+            const all = Array.from(document.querySelectorAll('*'));
+            let visible = 0;
+            let hidden = 0;
+            
+            all.forEach(el => {
+              const style = window.getComputedStyle(el);
+              if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0') {
+                visible++;
+              } else {
+                hidden++;
+              }
+            });
+            
+            return { visible, hidden, total: all.length };
+          });
+          console.log(`👁️ Element visibility: ${visibleElements.visible} visible, ${visibleElements.hidden} hidden, ${visibleElements.total} total`);
+          
+          // Check specifically for menu-related elements
+          const menuCheck = await page.evaluate(() => {
+            return {
+              roleMenu: document.querySelectorAll('[role="menu"]').length,
+              roleListbox: document.querySelectorAll('[role="listbox"]').length,
+              roleMenuitem: document.querySelectorAll('[role="menuitem"]').length,
+              hasJsaction: document.querySelectorAll('[jsaction]').length,
+              allDivs: document.querySelectorAll('div').length,
+              allButtons: document.querySelectorAll('button').length
+            };
+          });
+          console.log('🔍 Menu-specific elements:', JSON.stringify(menuCheck, null, 2));
         }
       } catch (debugError) {
         console.log('⚠️ Could not debug menu items:', debugError.message);
