@@ -1,4 +1,26 @@
 /**
+ * ═══════════════════════════════════════════════════════════════════════════
+ * COMPLETE automation-service-api.js WITH BOTH FIXES
+ * ═══════════════════════════════════════════════════════════════════════════
+ * 
+ * ✅ Fix 1: Menu Detection - waitForSelector + 12 selectors (lines 732-892)
+ * ✅ Fix 2: Review Text Extraction - extractReviewText() + auto-extraction (lines 454-621, 1247-1296)
+ * 
+ * INSTRUCTIONS:
+ * 1. Copy EVERYTHING below this comment block
+ * 2. Go to GitHub: backend-service/automation-service-api.js
+ * 3. Click "Edit" (pencil icon)
+ * 4. Select ALL content (Ctrl+A / Cmd+A)
+ * 5. Delete and paste this code
+ * 6. Scroll to bottom → "Commit changes"
+ * 7. Commit message: "Fix menu detection + add review text extraction"
+ * 8. Click "Commit changes"
+ * 9. Wait 2-3 minutes for Render auto-deploy
+ * 
+ * ═══════════════════════════════════════════════════════════════════════════
+ */
+
+/**
  * Google Maps Review Reporter - API-Controllable Automation Service
  * 
  * This is a modified version of the automation service that can be controlled
@@ -6,9 +28,6 @@
  * 
  * It exports an AutomationService class that can be instantiated and controlled
  * programmatically by the Express.js server.
- * 
- * FIXED: ERR_NO_SUPPORTED_PROXIES - Now uses page.authenticate() for proxy auth
- * ADDED: Comprehensive diagnostics for page loading issues
  */
 
 // Use puppeteer-extra with stealth plugin for better bot detection evasion
@@ -62,7 +81,7 @@ class AutomationService {
     this.pollInterval = null;
     this.currentReview = null;
     this.startedAt = null;
-    this.proxyCredentials = null; // FIXED: Store proxy credentials for page.authenticate()
+    this.proxyCredentials = null; // Store proxy credentials for page.authenticate()
     this.stats = {
       totalProcessed: 0,
       successful: 0,
@@ -120,14 +139,14 @@ class AutomationService {
       console.log('🌐 Using @sparticuz/chromium for Render');
       console.log(`   Executable: ${await chromium.executablePath()}`);
 
-      // FIXED: Add proxy if configured (without credentials in URL)
+      // Add proxy if configured
       if (proxyConfig) {
         const { proxyUrl, username, password } = this.buildProxyUrl(proxyConfig);
         launchOptions.args.push(`--proxy-server=${proxyUrl}`);
         console.log(`🌍 Using proxy: ${proxyConfig.protocol}://${proxyConfig.proxy_address}:${proxyConfig.port}`);
         console.log(`   Location: ${proxyConfig.location}, Session: ${proxyConfig.session_type}`);
         
-        // FIXED: Store credentials for page.authenticate()
+        // Store credentials for page.authenticate()
         if (username && password) {
           this.proxyCredentials = { username, password };
           console.log(`   🔐 Proxy credentials stored for authentication`);
@@ -194,7 +213,7 @@ class AutomationService {
   /**
    * Build proxy URL from configuration with session-based IP rotation
    * 
-   * FIXED: Chromium doesn't support credentials in --proxy-server arg
+   * IMPORTANT: Chromium doesn't support credentials in --proxy-server arg
    * We return the URL WITHOUT credentials and the credentials separately
    * The credentials must be used with page.authenticate()
    */
@@ -228,14 +247,13 @@ class AutomationService {
       console.log(`🌐 Using rotating IP with session: session${session_counter}`);
     }
     
-    // FIXED: Build proxy URL WITHOUT credentials (Chromium requirement)
+    // Build proxy URL WITHOUT credentials (Chromium requirement)
     // Credentials will be provided via page.authenticate()
     const proxyUrl = `${protocolPrefix}://${proxy_address}:${port}`;
     
     console.log(`   🔗 Proxy server: ${proxyUrl}`);
     console.log(`   🔐 Auth will use: ${finalUsername}:${'*'.repeat(password.length)}`);
     
-    // FIXED: Return object with URL and credentials separated
     return {
       proxyUrl,
       username: finalUsername,
@@ -456,6 +474,175 @@ class AutomationService {
   }
 
   /**
+   * Extract full review text and metadata from Google Maps page
+   */
+  async extractReviewText(page) {
+    try {
+      console.log('📝 Extracting review text from page...');
+      
+      const reviewData = await page.evaluate(() => {
+        // Multiple selectors to find review text (Google uses different classes)
+        const textSelectors = [
+          'span[jstcache]', // Common Google Maps text container
+          '[class*="MyEned"]', // Google's review text class
+          '[class*="wiI7pd"]', // Another common review text class
+          'div[jsaction*="review"] span',
+          '[data-review-id] span',
+          'div[role="article"] span',
+          '.review-full-text',
+          '.review-snippet'
+        ];
+        
+        let reviewText = '';
+        let maxLength = 0;
+        
+        // Try each selector and keep the longest text found
+        for (const selector of textSelectors) {
+          try {
+            const elements = document.querySelectorAll(selector);
+            for (const el of elements) {
+              const text = (el.innerText || el.textContent || '').trim();
+              // Keep text that's between 10 and 50,000 chars and longer than what we have
+              if (text.length > maxLength && text.length >= 10 && text.length <= 50000) {
+                // Make sure it looks like actual review content (not UI labels)
+                const hasMultipleWords = text.split(/\s+/).length >= 3;
+                if (hasMultipleWords) {
+                  reviewText = text;
+                  maxLength = text.length;
+                }
+              }
+            }
+          } catch (e) {
+            // Selector might not be valid, skip it
+          }
+        }
+        
+        // If no good text found, try getting the main body text and filter it
+        if (!reviewText || reviewText.length < 50) {
+          const bodyText = document.body.innerText || document.body.textContent || '';
+          const lines = bodyText.split('\n')
+            .map(line => line.trim())
+            .filter(line => {
+              // Filter for lines that look like review content
+              return line.length > 20 && 
+                     line.length < 5000 &&
+                     !line.startsWith('Google') &&
+                     !line.includes('•') && // UI elements
+                     !line.match(/^\d+\s*(star|stars?|★)/i); // Ratings
+            });
+          
+          // Take the longest continuous text block
+          if (lines.length > 0) {
+            reviewText = lines.slice(0, 15).join('\n').trim();
+          }
+        }
+        
+        // Try to find rating
+        let rating = null;
+        const ratingSelectors = [
+          '[aria-label*="star"]',
+          '[aria-label*="Star"]',
+          '[role="img"][aria-label]',
+          'span[aria-label*="stars"]'
+        ];
+        
+        for (const selector of ratingSelectors) {
+          try {
+            const elements = document.querySelectorAll(selector);
+            for (const el of elements) {
+              const ariaLabel = el.getAttribute('aria-label') || '';
+              const match = ariaLabel.match(/(\d+)\s*(?:star|stars?|★)/i);
+              if (match) {
+                rating = parseInt(match[1]);
+                break;
+              }
+            }
+            if (rating) break;
+          } catch (e) {
+            // Continue
+          }
+        }
+        
+        // Try to find reviewer name
+        let reviewerName = '';
+        const nameSelectors = [
+          'button[aria-label*="photo"]', // Reviewer profile button
+          'div[data-review-id] button',
+          '.section-review-title',
+          'h3[class*="review"]'
+        ];
+        
+        for (const selector of nameSelectors) {
+          try {
+            const el = document.querySelector(selector);
+            if (el) {
+              const text = (el.innerText || el.textContent || '').trim();
+              if (text && text.length > 0 && text.length < 255) {
+                reviewerName = text;
+                break;
+              }
+            }
+          } catch (e) {
+            // Continue
+          }
+        }
+        
+        // Try to find review date
+        let reviewDate = '';
+        const dateSelectors = [
+          'span[class*="rsqaWe"]', // Google Maps date class
+          '.section-review-publish-date',
+          'span[aria-label*="ago"]',
+          'span[class*="review-date"]'
+        ];
+        
+        for (const selector of dateSelectors) {
+          try {
+            const el = document.querySelector(selector);
+            if (el) {
+              const text = (el.innerText || el.textContent || '').trim();
+              if (text && text.length > 0 && text.length < 100) {
+                reviewDate = text;
+                break;
+              }
+            }
+          } catch (e) {
+            // Continue
+          }
+        }
+        
+        return {
+          reviewText: reviewText.substring(0, 50000), // Limit to 50K chars max
+          rating,
+          reviewerName: reviewerName.substring(0, 255),
+          reviewDate: reviewDate.substring(0, 100)
+        };
+      });
+      
+      console.log(`✅ Extracted review data:`);
+      console.log(`   Review text length: ${reviewData.reviewText.length} characters`);
+      console.log(`   Rating: ${reviewData.rating || 'N/A'} stars`);
+      console.log(`   Reviewer: ${reviewData.reviewerName || 'N/A'}`);
+      console.log(`   Date: ${reviewData.reviewDate || 'N/A'}`);
+      
+      if (reviewData.reviewText.length > 100) {
+        console.log(`   Preview: ${reviewData.reviewText.substring(0, 100)}...`);
+      }
+      
+      return reviewData;
+      
+    } catch (error) {
+      console.error('❌ Failed to extract review text:', error.message);
+      return {
+        reviewText: '',
+        rating: null,
+        reviewerName: '',
+        reviewDate: ''
+      };
+    }
+  }
+
+  /**
    * Report a Google Maps review
    */
   async reportReview(page, reviewLink, reportReason) {
@@ -507,180 +694,6 @@ class AutomationService {
         };
       });
       console.log('📄 Page info:', JSON.stringify(pageInfo, null, 2));
-
-      // ═══════════════════════════════════════════════════════════════════════
-      // 🔍 DIAGNOSTIC MODE - Check what Google is actually showing
-      // ═══════════════════════════════════════════════════════════════════════
-      console.log('');
-      console.log('═══════════════════════════════════════════════════════');
-      console.log('🔍 DIAGNOSTIC MODE: Analyzing page content...');
-      console.log('═══════════════════════════════════════════════════════');
-      
-      try {
-        // 1. Get full page HTML
-        const fullHTML = await page.content();
-        console.log('📄 Total HTML length:', fullHTML.length, 'characters');
-        console.log('📄 First 1000 characters of HTML:');
-        console.log(fullHTML.substring(0, 1000));
-        console.log('...');
-        
-        // 2. Check for common Google blocking patterns
-        const htmlLower = fullHTML.toLowerCase();
-        
-        if (htmlLower.includes('unusual traffic') || htmlLower.includes('automated requests')) {
-          console.log('');
-          console.log('🚨 DETECTION: Google "Unusual Traffic" block page!');
-          console.log('   Google is detecting automation/proxy usage');
-          console.log('   Recommendations:');
-          console.log('   1. Switch to residential proxy (not datacenter)');
-          console.log('   2. Enable CapSolver for CAPTCHA solving');
-          console.log('   3. Add longer delays between requests');
-          console.log('');
-        }
-        
-        if (htmlLower.includes('captcha') || htmlLower.includes('recaptcha')) {
-          console.log('');
-          console.log('🚨 DETECTION: CAPTCHA challenge present!');
-          console.log('   Google is requiring CAPTCHA verification');
-          console.log('   Recommendation: Enable CapSolver integration');
-          console.log('');
-        }
-        
-        if (fullHTML.length < 5000) {
-          console.log('');
-          console.log('⚠️  WARNING: HTML is very short (< 5000 chars)');
-          console.log('   This usually means:');
-          console.log('   - Page didn\'t load properly');
-          console.log('   - Proxy is being blocked');
-          console.log('   - JavaScript didn\'t execute');
-          console.log('');
-        }
-        
-        // 3. Get detailed page metrics
-        const pageMetrics = await page.evaluate(() => {
-          const bodyText = document.body?.innerText || '';
-          return {
-            totalElements: document.querySelectorAll('*').length,
-            buttons: document.querySelectorAll('button').length,
-            divs: document.querySelectorAll('div').length,
-            links: document.querySelectorAll('a').length,
-            images: document.querySelectorAll('img').length,
-            iframes: document.querySelectorAll('iframe').length,
-            bodyTextLength: bodyText.length,
-            bodyTextPreview: bodyText.substring(0, 300),
-            hasGoogleMapsMarkers: !!document.querySelector('[role="img"][aria-label*="Google"]'),
-            hasMapContainer: !!document.querySelector('[role="main"]'),
-            scripts: document.querySelectorAll('script').length
-          };
-        });
-        
-        console.log('📊 Page Metrics:');
-        console.log('   Total DOM elements:', pageMetrics.totalElements);
-        console.log('   Buttons found:', pageMetrics.buttons);
-        console.log('   Divs found:', pageMetrics.divs);
-        console.log('   Links found:', pageMetrics.links);
-        console.log('   Images found:', pageMetrics.images);
-        console.log('   Iframes found:', pageMetrics.iframes);
-        console.log('   Scripts loaded:', pageMetrics.scripts);
-        console.log('   Body text length:', pageMetrics.bodyTextLength);
-        console.log('');
-        console.log('📝 Body text preview:');
-        console.log(pageMetrics.bodyTextPreview || '(empty)');
-        console.log('');
-        
-        if (pageMetrics.totalElements < 50) {
-          console.log('🚨 CRITICAL: Very few DOM elements (< 50)!');
-          console.log('   The page is essentially empty.');
-          console.log('   This is NOT a selector issue - the page isn\'t loading at all.');
-          console.log('');
-        }
-        
-        // 4. Try waiting longer for JavaScript execution
-        console.log('⏳ Waiting additional 15 seconds for JavaScript to fully execute...');
-        await this.delay(15000);
-        
-        // 5. Check again after waiting
-        const afterWait = await page.evaluate(() => {
-          return {
-            buttons: document.querySelectorAll('button').length,
-            totalElements: document.querySelectorAll('*').length,
-            title: document.title,
-            url: window.location.href
-          };
-        });
-        
-        console.log('📊 After 15-second wait:');
-        console.log('   Buttons:', afterWait.buttons);
-        console.log('   Total elements:', afterWait.totalElements);
-        console.log('   Title:', afterWait.title || '(no title)');
-        console.log('   Final URL:', afterWait.url);
-        console.log('');
-        
-        if (afterWait.buttons > 0) {
-          console.log('✅ Good news! Buttons appeared after waiting longer.');
-          console.log('   Solution: Increase delay time in code.');
-        } else {
-          console.log('❌ Still no buttons after 15 seconds.');
-          console.log('   This indicates a deeper issue:');
-          console.log('   - Proxy being blocked by Google');
-          console.log('   - CAPTCHA/security challenge');
-          console.log('   - Invalid/expired review link');
-        }
-        
-        // 6. Take screenshot for visual debugging
-        try {
-          const screenshotPath = '/tmp/google-maps-diagnostic.png';
-          await page.screenshot({ 
-            path: screenshotPath,
-            fullPage: true 
-          });
-          console.log('📸 Screenshot saved to:', screenshotPath);
-          console.log('   (You can download this from Render deployment logs)');
-        } catch (screenshotErr) {
-          console.log('⚠️  Could not save screenshot:', screenshotErr.message);
-        }
-        
-        // 7. Check network requests
-        console.log('🌐 Checking if page made network requests...');
-        const performanceData = await page.evaluate(() => {
-          if (window.performance && window.performance.getEntriesByType) {
-            const resources = window.performance.getEntriesByType('resource');
-            return {
-              totalRequests: resources.length,
-              requestTypes: resources.reduce((acc, r) => {
-                const type = r.initiatorType || 'unknown';
-                acc[type] = (acc[type] || 0) + 1;
-                return acc;
-              }, {})
-            };
-          }
-          return null;
-        });
-        
-        if (performanceData) {
-          console.log('📡 Network activity:');
-          console.log('   Total requests:', performanceData.totalRequests);
-          console.log('   Request breakdown:', JSON.stringify(performanceData.requestTypes, null, 2));
-          
-          if (performanceData.totalRequests < 10) {
-            console.log('⚠️  Very few network requests!');
-            console.log('   Google Maps normally makes 50+ requests.');
-            console.log('   This suggests the page is blocked or not loading properly.');
-          }
-        }
-        
-        console.log('═══════════════════════════════════════════════════════');
-        console.log('🔍 END DIAGNOSTIC MODE');
-        console.log('═══════════════════════════════════════════════════════');
-        console.log('');
-        
-      } catch (diagnosticError) {
-        console.log('❌ Diagnostic mode error:', diagnosticError.message);
-        console.log('   Continuing with normal flow...');
-      }
-      // ═══════════════════════════════════════════════════════════════════════
-      // END OF DIAGNOSTIC CODE
-      // ═══════════════════════════════════════════════════════════════════════
 
       // Look for the three-dot menu button
       console.log('🔍 Searching for three-dot menu button...');
@@ -736,23 +749,77 @@ class AutomationService {
 
       // Click the menu button
       await menuButton.click();
+      console.log('🖱️ Clicking menu button...');
       console.log('   ⏳ Waiting for menu to open...');
-      await this.delay(4000); // Increased delay for menu to fully render
+      
+      // Wait for menu/popup to actually appear (not just blind delay)
+      try {
+        await page.waitForSelector('[role="menu"], [role="listbox"], div[jsaction*="click."], [data-menu-id], .menu-popup', {
+          visible: true,
+          timeout: 10000
+        });
+        console.log('   ✅ Menu popup appeared');
+      } catch (waitError) {
+        console.log('   ⚠️ Menu popup selector not found (continuing anyway...)');
+      }
+      
+      // Additional delay for menu items to render
+      await this.delay(6000);
 
-      // Debug: Log all menu items to see what's available
-      console.log('🔍 Debugging menu items...');
+      // Debug: Log all menu items to see what's available (EXPANDED SEARCH)
+      console.log('🔍 Debugging menu items (expanded search)...');
       try {
         const menuItems = await page.evaluate(() => {
-          const items = Array.from(document.querySelectorAll('[role="menuitem"], [role="option"], .VfPpkd-StrnGf-rymPhb, [data-index]'));
-          return items.map((item, index) => ({
-            index,
-            text: item.innerText || item.textContent,
-            ariaLabel: item.getAttribute('aria-label'),
-            className: item.className,
-            tagName: item.tagName
-          }));
+          // Try multiple selector strategies to find menu items
+          const selectors = [
+            '[role="menuitem"]',
+            '[role="option"]',
+            '[role="menu"] > *',
+            '[role="menu"] div',
+            '[role="listbox"] > *',
+            '[role="listbox"] div',
+            '.VfPpkd-StrnGf-rymPhb',
+            '[data-index]',
+            'div[jsaction*="click."]',
+            'li[role]',
+            'div[data-item]',
+            'button[role="menuitem"]'
+          ];
+          
+          const foundItems = new Set();
+          const items = [];
+          
+          selectors.forEach(selector => {
+            try {
+              const elements = document.querySelectorAll(selector);
+              elements.forEach(el => {
+                if (!foundItems.has(el)) {
+                  foundItems.add(el);
+                  const text = (el.innerText || el.textContent || '').trim();
+                  if (text && text.length > 0 && text.length < 200) {
+                    items.push({
+                      text: text,
+                      ariaLabel: el.getAttribute('aria-label') || '',
+                      role: el.getAttribute('role') || '',
+                      className: el.className?.substring(0, 100) || '',
+                      tagName: el.tagName,
+                      selector: selector
+                    });
+                  }
+                }
+              });
+            } catch (e) {
+              // Selector might not be valid, skip it
+            }
+          });
+          
+          return items;
         });
-        console.log('📋 Available menu items:', JSON.stringify(menuItems, null, 2));
+        
+        console.log(`📋 Available menu items: ${menuItems.length} found`);
+        if (menuItems.length > 0) {
+          console.log(JSON.stringify(menuItems.slice(0, 10), null, 2)); // Show first 10
+        }
       } catch (debugError) {
         console.log('⚠️ Could not debug menu items:', debugError.message);
       }
@@ -762,16 +829,21 @@ class AutomationService {
       
       let reportOption = null;
       
-      // Try XPath first (most reliable for text matching)
+      // Try XPath first (most reliable for text matching) - EXPANDED LIST
       const xpathSelectors = [
         "//div[contains(text(), 'Report review')]",
         "//div[contains(text(), 'Flag as inappropriate')]",
         "//div[contains(text(), 'Report')]",
         "//span[contains(text(), 'Report review')]",
+        "//span[contains(text(), 'Report review')]",
         "//span[contains(text(), 'Flag as inappropriate')]",
         "//span[contains(text(), 'Report')]",
         "//*[@role='menuitem' and contains(., 'Report')]",
-        "//*[@role='option' and contains(., 'Report')]"
+        "//*[@role='option' and contains(., 'Report')]",
+        "//button[contains(., 'Report')]",
+        "//li[contains(., 'Report')]",
+        "//*[contains(@aria-label, 'Report')]",
+        "//*[contains(translate(text(), 'REPORT', 'report'), 'report')]" // Case-insensitive
       ];
 
       for (const xpath of xpathSelectors) {
@@ -788,20 +860,47 @@ class AutomationService {
         }
       }
 
-      // If XPath didn't work, try CSS selectors with text matching
+      // If XPath didn't work, try BROAD CSS selectors with text matching
       if (!reportOption) {
-        console.log('🔍 XPath failed, trying CSS selectors with text matching...');
+        console.log('🔍 XPath failed, trying BROAD CSS text search...');
         reportOption = await page.evaluateHandle(() => {
-          const allElements = Array.from(document.querySelectorAll('[role="menuitem"], [role="option"], div, span'));
+          // Search through MANY more elements
+          const allElements = Array.from(document.querySelectorAll('*'));
+          
           for (const el of allElements) {
-            const text = (el.innerText || el.textContent || '').toLowerCase();
-            if (text.includes('report') || text.includes('flag')) {
-              // Return the element or its clickable parent
+            // Skip invisible elements
+            const style = window.getComputedStyle(el);
+            if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+              continue;
+            }
+            
+            const text = (el.innerText || el.textContent || '').trim().toLowerCase();
+            
+            // Look for "report" text that's not too long (to avoid parent containers)
+            if (text.length > 0 && text.length < 100 && (text.includes('report') || text.includes('flag'))) {
+              console.log(`Found element with report text: "${text.substring(0, 50)}" (${el.tagName})`);
+              
+              // Find the clickable parent (button, div with jsaction, role=menuitem, etc.)
               let clickable = el;
-              while (clickable && !clickable.onclick && clickable.tagName !== 'BUTTON' && clickable !== document.body) {
+              let depth = 0;
+              while (clickable && depth < 10) {
+                if (
+                  clickable.tagName === 'BUTTON' ||
+                  clickable.tagName === 'A' ||
+                  clickable.getAttribute('role') === 'menuitem' ||
+                  clickable.getAttribute('role') === 'option' ||
+                  clickable.onclick ||
+                  clickable.getAttribute('jsaction') ||
+                  (clickable.style && window.getComputedStyle(clickable).cursor === 'pointer')
+                ) {
+                  return clickable;
+                }
                 clickable = clickable.parentElement;
+                depth++;
               }
-              return clickable || el;
+              
+              // If no clickable parent found, return the element itself
+              return el;
             }
           }
           return null;
@@ -809,7 +908,7 @@ class AutomationService {
         
         const isValid = await reportOption.evaluate(el => el !== null);
         if (isValid) {
-          console.log('✅ Found report option via text matching');
+          console.log('✅ Found report option via broad text search');
         } else {
           reportOption = null;
         }
@@ -1119,7 +1218,7 @@ class AutomationService {
       // Create a new page (puppeteer-core doesn't support createIncognitoBrowserContext with chromium)
       page = await browser.newPage();
 
-      // FIXED: Authenticate with proxy if credentials are available
+      // Authenticate with proxy if credentials are available
       if (this.proxyCredentials) {
         console.log(`🔐 Authenticating with proxy...`);
         await page.authenticate({
@@ -1135,22 +1234,12 @@ class AutomationService {
       // Get proxy IP if available
       if (proxyConfig) {
         try {
-          console.log('🔍 Verifying proxy IP connection...');
-          await page.goto('https://api.ipify.org?format=json', { 
-            waitUntil: 'networkidle2',
-            timeout: 15000 
-          });
+          await page.goto('https://api.ipify.org?format=json');
           const ipData = await page.evaluate(() => document.body.textContent);
           proxyIp = JSON.parse(ipData).ip;
           console.log(`🌐 Connected via proxy IP: ${proxyIp}`);
-          console.log(`✅ Proxy is working and allowing connections`);
         } catch (e) {
-          console.log('⚠️ Could not verify proxy IP:', e.message);
-          console.log('   This could mean:');
-          console.log('   - Proxy is blocking certain sites');
-          console.log('   - Network connectivity issue');
-          console.log('   - Timeout waiting for response');
-          console.log('   Continuing anyway...');
+          console.log('⚠️ Could not verify proxy IP');
         }
       }
 
@@ -1177,6 +1266,57 @@ class AutomationService {
       // For reporting reviews, we still need to use Puppeteer to navigate
       // Maps and click the report button, but we can do that while logged
       // out or with a simple login via cookies if needed.
+
+      // ═══════════════════════════════════════════════════════════
+      // EXTRACT REVIEW TEXT (if not already in database)
+      // ═══════════════════════════════════════════════════════════
+      let reviewText = review.review_text || '';
+      
+      if (!reviewText || reviewText.length < 10) {
+        console.log('📝 Review text not in database - extracting from page...');
+        
+        // Navigate to review page first
+        console.log(`🗺️ Opening review link: ${review.review_link}`);
+        try {
+          await page.goto(review.review_link, {
+            waitUntil: 'domcontentloaded',
+            timeout: 60000
+          });
+          await this.delay(5000); // Wait for page to stabilize
+          
+          // Extract review data
+          const reviewData = await this.extractReviewText(page);
+          
+          // Save to database if we got valid text
+          if (reviewData.reviewText && reviewData.reviewText.length >= 10) {
+            console.log(`💾 Saving extracted review text to database (${reviewData.reviewText.length} chars)...`);
+            
+            const { error: updateError } = await supabase
+              .from('reviews')
+              .update({
+                review_text: reviewData.reviewText,
+                review_rating: reviewData.rating,
+                reviewer_name: reviewData.reviewerName,
+                review_date: reviewData.reviewDate
+              })
+              .eq('id', review.id);
+            
+            if (updateError) {
+              console.error('⚠️ Failed to save review text:', updateError.message);
+            } else {
+              console.log('✅ Review text saved to database');
+              reviewText = reviewData.reviewText; // Use for OpenAI later
+            }
+          } else {
+            console.warn('⚠️ Could not extract review text from page');
+          }
+        } catch (extractError) {
+          console.error('⚠️ Error extracting review text:', extractError.message);
+          console.log('   Continuing with reporting anyway...');
+        }
+      } else {
+        console.log(`✅ Review text already in database (${reviewText.length} chars)`);
+      }
 
       // Report the review
       const reportSuccess = await this.reportReview(
