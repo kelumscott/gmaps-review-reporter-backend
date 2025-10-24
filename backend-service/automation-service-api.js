@@ -826,35 +826,84 @@ class AutomationService {
         console.log('✅ Page has sufficient UI elements (', pageInfo.hasButtons, 'buttons)');
       }
 
-      // Look for the three-dot menu button
-      console.log('🔍 Searching for three-dot menu button...');
-      const menuSelectors = [
-        'button[aria-label*="More"]',
-        'button[aria-label*="Menu"]',
-        'button[aria-label*="More options"]',
-        'button[data-item-id*="overflow"]',
-        '[role="button"][aria-haspopup="menu"]',
-        'button[jsaction*="menu"]',
-        'button[data-tooltip*="More"]',
-        'button.VfPpkd-Bz112c-LgbsSe' // Google's material design button class
-      ];
-
-      let menuButton = null;
-      for (const selector of menuSelectors) {
-        try {
-          menuButton = await page.$(selector);
-          if (menuButton) {
-            console.log(`✅ Found menu button with selector: ${selector}`);
+      // Look for the three-dot menu button ON THE REVIEW (not main menu)
+      console.log('🔍 Searching for review\'s three-dot menu button...');
+      
+      // Strategy: Find the review container first, then find the three-dot button within it
+      // This avoids clicking the main hamburger menu
+      const menuButton = await page.evaluate(() => {
+        // Try to find the review container first
+        const reviewSelectors = [
+          '[data-review-id]',
+          '[jsaction*="review"]',
+          'div[role="article"]',
+          '.review',
+          '[data-photo-index]' // Reviews often have photo containers
+        ];
+        
+        let reviewContainer = null;
+        for (const selector of reviewSelectors) {
+          const containers = document.querySelectorAll(selector);
+          if (containers.length > 0) {
+            reviewContainer = containers[0];
             break;
           }
-        } catch (e) {
-          continue;
         }
+        
+        // If we found a review container, look for three-dot button within it
+        if (reviewContainer) {
+          console.log('   ✓ Found review container, looking for menu button inside...');
+          
+          const buttonSelectors = [
+            'button[aria-label*="More options"]',
+            'button[aria-label*="More"]',
+            'button[data-tooltip*="More"]',
+            'button[aria-haspopup="menu"]'
+          ];
+          
+          for (const selector of buttonSelectors) {
+            const button = reviewContainer.querySelector(selector);
+            if (button) {
+              // Mark it so we can find it from Puppeteer
+              button.setAttribute('data-review-menu-found', 'true');
+              return { success: true, selector: selector };
+            }
+          }
+        }
+        
+        // Fallback: Look for ALL buttons with "More" that are NOT in the main navigation
+        console.log('   ⚠️ Review container not found, trying all "More" buttons...');
+        const allMoreButtons = Array.from(document.querySelectorAll('button[aria-label*="More"]'));
+        
+        for (const button of allMoreButtons) {
+          const ariaLabel = button.getAttribute('aria-label') || '';
+          const buttonText = button.innerText || '';
+          
+          // Skip main menu buttons (they have specific text/labels)
+          if (ariaLabel.includes('Main menu') || 
+              ariaLabel.includes('Google apps') ||
+              buttonText.includes('Menu')) {
+            continue;
+          }
+          
+          // This is likely the review's three-dot button
+          button.setAttribute('data-review-menu-found', 'true');
+          return { success: true, selector: 'button[aria-label*="More"]' };
+        }
+        
+        return { success: false };
+      });
+      
+      let actualMenuButton = null;
+      if (menuButton && menuButton.success) {
+        console.log(`✅ Found review menu button with selector: ${menuButton.selector}`);
+        // Get the actual button element that we marked
+        actualMenuButton = await page.$('button[data-review-menu-found="true"]');
       }
 
-      if (!menuButton) {
+      if (!actualMenuButton) {
         // Debug: Show all buttons on the page
-        console.log('⚠️ Could not find menu button. Debugging all buttons on page...');
+        console.log('⚠️ Could not find review menu button. Debugging all buttons on page...');
         const allButtons = await page.evaluate(() => {
           const buttons = Array.from(document.querySelectorAll('button'));
           return buttons.slice(0, 20).map((btn, i) => ({
@@ -886,12 +935,12 @@ class AutomationService {
       console.log('🖱️ Step 1: Scrolling menu button into view...');
       await page.evaluate(el => {
         el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      }, menuButton);
+      }, actualMenuButton);
       await this.delay(1000);
       
       // Strategy 2: Move mouse to button (human-like behavior)
       console.log('🖱️ Step 2: Moving mouse to button...');
-      const buttonBox = await menuButton.boundingBox();
+      const buttonBox = await actualMenuButton.boundingBox();
       if (buttonBox) {
         await page.mouse.move(
           buttonBox.x + buttonBox.width / 2,
@@ -907,7 +956,7 @@ class AutomationService {
       
       // Method 1: Standard Puppeteer click
       try {
-        await menuButton.click();
+        await actualMenuButton.click();
         console.log('   ✓ Method 1: Standard click executed');
         await this.delay(2000);
         
@@ -935,7 +984,7 @@ class AutomationService {
       if (!menuOpened) {
         console.log('   Trying Method 2: JavaScript click...');
         try {
-          await page.evaluate(el => el.click(), menuButton);
+          await page.evaluate(el => el.click(), actualMenuButton);
           await this.delay(2000);
           
           const menuVisible = await page.evaluate(() => {
@@ -970,7 +1019,7 @@ class AutomationService {
               buttons: 1
             });
             el.dispatchEvent(event);
-          }, menuButton);
+          }, actualMenuButton);
           await this.delay(2000);
           
           const menuVisible = await page.evaluate(() => {
@@ -997,7 +1046,7 @@ class AutomationService {
       if (!menuOpened) {
         console.log('   Trying Method 4: Double click...');
         try {
-          await menuButton.click({ clickCount: 2 });
+          await actualMenuButton.click({ clickCount: 2 });
           await this.delay(2000);
           
           const menuVisible = await page.evaluate(() => {
