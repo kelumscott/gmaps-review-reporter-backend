@@ -1443,38 +1443,73 @@ class AutomationService {
       // Debug: Show all available report reasons
       console.log('🔍 Debugging available report reasons...');
       try {
-        const availableReasons = await page.evaluate(() => {
+        const debugResult = await page.evaluate(() => {
           const reasons = [];
+          const debugInfo = {};
           
           // IMPORTANT: Search ONLY inside the report dialog, not the entire page!
           // Try multiple dialog selectors
           const allDialogs = document.querySelectorAll('[role="dialog"], [role="alertdialog"], .VfPpkd-cnG4Wd');
-          console.log(`   🔍 Found ${allDialogs.length} dialog(s) on page`);
+          debugInfo.dialogCount = allDialogs.length;
           
           if (allDialogs.length === 0) {
-            console.log('   ⚠️ No dialog found on page!');
-            return [];
+            debugInfo.error = 'No dialog found on page';
+            return { reasons: [], debugInfo };
           }
           
-          // Use the LAST dialog (most recently opened)
-          const dialog = allDialogs[allDialogs.length - 1];
-          console.log(`   ✓ Using dialog #${allDialogs.length} (last/most recent)`);
+          // Check EACH dialog and find the one with report-related content
+          debugInfo.allDialogsInfo = [];
+          let reportDialog = null;
           
-          // Debug: Show what's in the dialog
-          const dialogHTML = dialog.innerHTML;
-          console.log(`   📄 Dialog HTML length: ${dialogHTML.length} chars`);
-          console.log(`   📄 Dialog text content: "${dialog.textContent?.substring(0, 200)}..."`);
+          for (let i = 0; i < allDialogs.length; i++) {
+            const d = allDialogs[i];
+            const text = d.textContent || '';
+            const labelCount = d.querySelectorAll('label').length;
+            const radioCount = d.querySelectorAll('[role="radio"]').length;
+            const buttonCount = d.querySelectorAll('button').length;
+            
+            const info = {
+              index: i,
+              textSnippet: text.substring(0, 150).trim(),
+              labelCount,
+              radioCount,
+              buttonCount,
+              totalElements: d.querySelectorAll('*').length,
+              htmlLength: d.innerHTML.length
+            };
+            
+            debugInfo.allDialogsInfo.push(info);
+            
+            // Look for report-related keywords in dialog text
+            const lowerText = text.toLowerCase();
+            if (
+              lowerText.includes('report') ||
+              lowerText.includes('fake') ||
+              lowerText.includes('offensive') ||
+              lowerText.includes('conflict') ||
+              lowerText.includes('inappropriate')
+            ) {
+              reportDialog = d;
+              debugInfo.selectedDialogIndex = i;
+              debugInfo.selectedReason = 'Contains report-related keywords';
+            }
+          }
           
-          // Count elements inside dialog
-          const allInside = dialog.querySelectorAll('*');
-          console.log(`   📊 Dialog contains ${allInside.length} elements total`);
+          // If no report-related dialog found, use last one
+          if (!reportDialog) {
+            reportDialog = allDialogs[allDialogs.length - 1];
+            debugInfo.selectedDialogIndex = allDialogs.length - 1;
+            debugInfo.selectedReason = 'Using last dialog (fallback)';
+          }
           
-          // Look for radio buttons, labels, and clickable elements INSIDE the dialog
-          console.log(`   🔍 Searching for: labels, radios, options...`);
-          const labelCount = dialog.querySelectorAll('label').length;
-          const radioCount = dialog.querySelectorAll('[role="radio"]').length;
-          const buttonCount = dialog.querySelectorAll('button').length;
-          console.log(`   📊 Found: ${labelCount} labels, ${radioCount} radios, ${buttonCount} buttons`);
+          const dialog = reportDialog;
+          debugInfo.selectedDialog = {
+            textSnippet: dialog.textContent?.substring(0, 200),
+            labelCount: dialog.querySelectorAll('label').length,
+            radioCount: dialog.querySelectorAll('[role="radio"]').length,
+            buttonCount: dialog.querySelectorAll('button').length,
+            htmlLength: dialog.innerHTML.length
+          };
           
           const elements = Array.from(dialog.querySelectorAll([
             'label',
@@ -1500,8 +1535,23 @@ class AutomationService {
             }
           });
           
-          return reasons;
+          return { reasons, debugInfo };
         });
+        
+        // Log debug info
+        console.log(`   🔍 Found ${debugResult.debugInfo.dialogCount} dialog(s) on page`);
+        if (debugResult.debugInfo.allDialogsInfo) {
+          console.log('   📋 All dialogs found:');
+          debugResult.debugInfo.allDialogsInfo.forEach((info, i) => {
+            console.log(`      Dialog ${i}: ${info.labelCount} labels, ${info.radioCount} radios, ${info.buttonCount} buttons`);
+            console.log(`         Text: "${info.textSnippet.substring(0, 80)}..."`);
+          });
+        }
+        console.log(`   ✓ Using dialog #${debugResult.debugInfo.selectedDialogIndex}: ${debugResult.debugInfo.selectedReason}`);
+        console.log(`   📊 Selected dialog: ${debugResult.debugInfo.selectedDialog.labelCount} labels, ${debugResult.debugInfo.selectedDialog.radioCount} radios, ${debugResult.debugInfo.selectedDialog.buttonCount} buttons`);
+        console.log(`   📄 Selected dialog text: "${debugResult.debugInfo.selectedDialog.textSnippet?.substring(0, 100)}..."`);
+        
+        const availableReasons = debugResult.reasons;
         console.log('📋 Available report reasons:', JSON.stringify(availableReasons, null, 2));
         
         // If no reasons found, try to debug what went wrong
@@ -1546,15 +1596,31 @@ class AutomationService {
         // Try to find and click the reason option
         let reasonClicked = false;
         
-        // Strategy 1: Find by exact text match (case-sensitive) INSIDE DIALOG
-        console.log('   🔍 Strategy 1: Exact text match (inside dialog)');
+        // Strategy 1: Find by exact text match (case-sensitive) INSIDE REPORT DIALOG
+        console.log('   🔍 Strategy 1: Exact text match (inside report dialog)');
         const exactTextResult = await page.evaluate((reason) => {
-          // Search ONLY inside dialog
-          const dialog = document.querySelector('[role="dialog"], [role="alertdialog"], .VfPpkd-cnG4Wd');
-          if (!dialog) {
-            console.log('   ⚠️ No dialog found for reason search');
+          // Find the REPORT dialog (with report keywords)
+          const allDialogs = document.querySelectorAll('[role="dialog"], [role="alertdialog"], .VfPpkd-cnG4Wd');
+          let reportDialog = null;
+          
+          for (const d of allDialogs) {
+            const text = (d.textContent || '').toLowerCase();
+            if (text.includes('report') || text.includes('fake') || text.includes('offensive') || text.includes('conflict')) {
+              reportDialog = d;
+              break;
+            }
+          }
+          
+          // Fallback to last dialog
+          if (!reportDialog && allDialogs.length > 0) {
+            reportDialog = allDialogs[allDialogs.length - 1];
+          }
+          
+          if (!reportDialog) {
             return { success: false };
           }
+          
+          const dialog = reportDialog;
           
           const allElements = Array.from(dialog.querySelectorAll('*'));
           for (const el of allElements) {
@@ -1620,19 +1686,32 @@ class AutomationService {
           }
         }
         
-        // Strategy 3: Find radio button with matching text in parent/sibling (inside dialog)
+        // Strategy 3: Find radio button with matching text in parent/sibling (inside REPORT dialog)
         if (!reasonClicked) {
-          console.log('   🔍 Strategy 3: Radio button with matching sibling text (inside dialog)');
+          console.log('   🔍 Strategy 3: Radio button with matching sibling text (inside report dialog)');
           const radioClicked = await page.evaluate((reason) => {
-            // Search ONLY inside dialog
-            const dialog = document.querySelector('[role="dialog"], [role="alertdialog"], .VfPpkd-cnG4Wd');
-            if (!dialog) {
-              console.log('   ⚠️ No dialog found');
+            // Find the REPORT dialog
+            const allDialogs = document.querySelectorAll('[role="dialog"], [role="alertdialog"], .VfPpkd-cnG4Wd');
+            let reportDialog = null;
+            
+            for (const d of allDialogs) {
+              const text = (d.textContent || '').toLowerCase();
+              if (text.includes('report') || text.includes('fake') || text.includes('offensive')) {
+                reportDialog = d;
+                break;
+              }
+            }
+            
+            if (!reportDialog && allDialogs.length > 0) {
+              reportDialog = allDialogs[allDialogs.length - 1];
+            }
+            
+            if (!reportDialog) {
               return false;
             }
             
+            const dialog = reportDialog;
             const radios = Array.from(dialog.querySelectorAll('[role="radio"], input[type="radio"]'));
-            console.log(`   Found ${radios.length} radio buttons in dialog`);
             
             for (const radio of radios) {
               // Check parent and sibling text
