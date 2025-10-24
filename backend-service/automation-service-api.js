@@ -855,8 +855,10 @@ class AutomationService {
           console.log('   ✓ Found review container, looking for menu button inside...');
           
           const buttonSelectors = [
+            'button[aria-label*="Actions"]',  // Google uses "Actions for [name]'s review"
             'button[aria-label*="More options"]',
             'button[aria-label*="More"]',
+            'button[data-tooltip*="Actions"]',
             'button[data-tooltip*="More"]',
             'button[aria-haspopup="menu"]'
           ];
@@ -871,8 +873,23 @@ class AutomationService {
           }
         }
         
-        // Fallback: Look for ALL buttons with "More" that are NOT in the main navigation
-        console.log('   ⚠️ Review container not found, trying all "More" buttons...');
+        // Fallback: Look for buttons with "Actions" (Google's label for review three-dot menu)
+        console.log('   ⚠️ Review container not found, trying all "Actions" buttons...');
+        const allActionButtons = Array.from(document.querySelectorAll('button[aria-label*="Actions"]'));
+        
+        for (const button of allActionButtons) {
+          const ariaLabel = button.getAttribute('aria-label') || '';
+          
+          // Look for "Actions for [name]'s review" pattern
+          if (ariaLabel.includes('Actions') && ariaLabel.includes('review')) {
+            console.log('   ✓ Found button with aria-label:', ariaLabel);
+            button.setAttribute('data-review-menu-found', 'true');
+            return { success: true, selector: 'button[aria-label*="Actions"]' };
+          }
+        }
+        
+        // Final fallback: Look for ALL buttons with "More" that are NOT in the main navigation
+        console.log('   ⚠️ "Actions" buttons not found, trying "More" buttons...');
         const allMoreButtons = Array.from(document.querySelectorAll('button[aria-label*="More"]'));
         
         for (const button of allMoreButtons) {
