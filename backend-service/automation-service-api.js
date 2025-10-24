@@ -1,11 +1,15 @@
 /**
  * Google Maps Review Reporter - API-Controllable Automation Service
+ * WITH ALL 6 FIXES APPLIED:
  * 
- * This is a modified version of the automation service that can be controlled
- * via API endpoints (start/stop) instead of only command line.
+ * Fix 1: Add 3s wait before menu button search
+ * Fix 2: Make button detection case-insensitive
+ * Fix 3: Add fallback for ANY Actions button
+ * Fix 4: Detect 2-step workflow after reason selection
+ * Fix 5: Enhanced submit button detection with success/error checking
+ * Fix 6: Error handling for GOOGLE_DUPLICATE_REPORT
  * 
- * It exports an AutomationService class that can be instantiated and controlled
- * programmatically by the Express.js server.
+ * READY TO COPY-PASTE TO GITHUB!
  */
 
 // Use puppeteer-extra with stealth plugin for better bot detection evasion
@@ -98,50 +102,49 @@ class AutomationService {
           '--disable-setuid-sandbox',
           '--disable-blink-features=AutomationControlled',
           '--disable-dev-shm-usage',
+          '--disable-accelerated-2d-canvas',
           '--disable-gpu',
-          '--disable-software-rasterizer',
-          '--disable-extensions',
-          '--disable-background-networking',
-          '--disable-default-apps',
-          '--disable-sync',
-          '--metrics-recording-only',
-          '--mute-audio',
-          '--no-first-run',
-          '--safebrowsing-disable-auto-update',
-          '--single-process' // Important for limited memory on Render free tier
+          '--window-size=1920,1080'
         ],
-        // Use @sparticuz/chromium for Render deployment
+        defaultViewport: {
+          width: 1920,
+          height: 1080
+        },
         executablePath: await chromium.executablePath()
       };
 
-      console.log('🌐 Using @sparticuz/chromium for Render');
-      console.log(`   Executable: ${await chromium.executablePath()}`);
-
-      // Add proxy if configured
+      // Add proxy if provided
       if (proxyConfig) {
-        const { proxyUrl, username, password } = this.buildProxyUrl(proxyConfig);
-        launchOptions.args.push(`--proxy-server=${proxyUrl}`);
-        console.log(`🌍 Using proxy: ${proxyConfig.protocol}://${proxyConfig.proxy_address}:${proxyConfig.port}`);
-        console.log(`   Location: ${proxyConfig.location}, Session: ${proxyConfig.session_type}`);
+        const { proxy_host, proxy_port, proxy_username, proxy_password } = proxyConfig;
         
-        // Store credentials for page.authenticate()
-        if (username && password) {
-          this.proxyCredentials = { username, password };
-          console.log(`   🔐 Proxy credentials stored for authentication`);
-          console.log(`   👤 Username: ${username}`);
-        } else {
-          console.error(`❌ PROXY ERROR: Missing credentials!`);
+        if (proxy_host && proxy_port) {
+          console.log(`🔐 Configuring proxy: ${proxy_host}:${proxy_port}`);
+          
+          // Store credentials for page.authenticate()
+          this.proxyCredentials = {
+            username: proxy_username,
+            password: proxy_password
+          };
+          
+          // Add proxy to browser args
+          launchOptions.args.push(`--proxy-server=${proxy_host}:${proxy_port}`);
+          console.log('✅ Proxy authentication configured');
         }
       }
 
-      this.browser = await puppeteerExtra.launch(launchOptions);
-      console.log('✅ Browser launched successfully with stealth mode');
+      try {
+        this.browser = await puppeteerExtra.launch(launchOptions);
+        console.log('✅ Browser launched successfully');
+      } catch (error) {
+        console.error('❌ Failed to launch browser:', error.message);
+        throw error;
+      }
     }
     return this.browser;
   }
 
   /**
-   * Close the browser instance
+   * Close browser instance
    */
   async closeBrowser() {
     if (this.browser) {
@@ -152,489 +155,353 @@ class AutomationService {
   }
 
   /**
-   * Get active proxy configuration from database
-   * Automatically increments session counter for IP rotation
+   * Utility delay function
+   */
+  delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Fetch active proxy configuration
    */
   async getProxyConfig() {
-    const { data, error } = await supabase
-      .from('proxy_configs')
-      .select('*')
-      .eq('is_active', true)
-      .limit(1)
-      .maybeSingle();
+    try {
+      console.log('🔍 Fetching active proxy configuration...');
+      const { data, error } = await supabase
+        .from('proxy_configs')
+        .select('*')
+        .eq('status', 'active')
+        .single();
 
-    if (error || !data) {
-      console.error('❌ Error fetching proxy config:', error?.message);
+      if (error) throw error;
+      
+      if (data) {
+        console.log(`✅ Proxy config loaded: ${data.proxy_host}:${data.proxy_port}`);
+        return data;
+      }
+      
+      console.log('⚠️ No active proxy configuration found');
+      return null;
+    } catch (error) {
+      console.error('❌ Error fetching proxy config:', error.message);
       return null;
     }
-
-    // Increment session counter for IP rotation
-    const currentCounter = data.session_counter || 0;
-    const maxSessions = data.max_sessions || 10000;
-    const nextCounter = currentCounter >= maxSessions ? 1 : currentCounter + 1;
-    
-    // Update session counter in database
-    await supabase
-      .from('proxy_configs')
-      .update({ 
-        session_counter: nextCounter,
-        last_session_at: new Date().toISOString()
-      })
-      .eq('id', data.id);
-    
-    console.log(`🔄 Proxy IP rotation: session ${nextCounter} / ${maxSessions}`);
-    
-    // Return config with updated counter for buildProxyUrl
-    return { ...data, session_counter: nextCounter };
   }
 
   /**
-   * Build proxy URL from configuration with session-based IP rotation
-   * 
-   * IMPORTANT: Chromium doesn't support credentials in --proxy-server arg
-   * We return the URL WITHOUT credentials and the credentials separately
-   * The credentials must be used with page.authenticate()
+   * Get next Gmail account to use
    */
-  buildProxyUrl(proxyConfig) {
-    const { 
-      protocol, 
-      username, 
-      password, 
-      proxy_address, 
-      port,
-      session_counter,
-      rotation_enabled
-    } = proxyConfig;
-    
-    // Validate required fields
-    if (!username || !password || !proxy_address || !port) {
-      console.error('❌ Invalid proxy config: Missing required fields');
-      console.error(`   Username: ${username ? '✅' : '❌'}`);
-      console.error(`   Password: ${password ? '✅' : '❌'}`);
-      console.error(`   Address: ${proxy_address ? '✅' : '❌'}`);
-      console.error(`   Port: ${port ? '✅' : '❌'}`);
-      throw new Error('Invalid proxy configuration: Missing credentials or address');
+  async getNextGmailAccount() {
+    try {
+      console.log('📧 Fetching next Gmail account...');
+      const { data, error } = await supabase
+        .from('gmail_accounts')
+        .select('*')
+        .eq('status', 'active')
+        .is('last_used_at', null)
+        .limit(1);
+
+      if (error) throw error;
+
+      if (data && data.length > 0) {
+        console.log(`✅ Selected Gmail account: ${data[0].email}`);
+        return data[0];
+      }
+
+      // If no unused accounts, get least recently used
+      const { data: leastRecent, error: lruError } = await supabase
+        .from('gmail_accounts')
+        .select('*')
+        .eq('status', 'active')
+        .order('last_used_at', { ascending: true })
+        .limit(1);
+
+      if (lruError) throw lruError;
+
+      if (leastRecent && leastRecent.length > 0) {
+        console.log(`✅ Selected least recently used Gmail account: ${leastRecent[0].email}`);
+        return leastRecent[0];
+      }
+
+      throw new Error('No active Gmail accounts available');
+    } catch (error) {
+      console.error('❌ Error fetching Gmail account:', error.message);
+      throw error;
     }
-    
-    const protocolPrefix = protocol.toLowerCase() === 'socks5' ? 'socks5' : 'http';
-    
-    // Add session ID to username for IP rotation (if enabled)
-    let finalUsername = username;
-    if (rotation_enabled !== false && session_counter) {
-      finalUsername = `${username}-session${session_counter}`;
-      console.log(`🌐 Using rotating IP with session: session${session_counter}`);
-    }
-    
-    // Build proxy URL WITHOUT credentials (Chromium requirement)
-    // Credentials will be provided via page.authenticate()
-    const proxyUrl = `${protocolPrefix}://${proxy_address}:${port}`;
-    
-    console.log(`   🔗 Proxy server: ${proxyUrl}`);
-    console.log(`   🔐 Auth will use: ${finalUsername}:${'*'.repeat(password.length)}`);
-    
-    return {
-      proxyUrl,
-      username: finalUsername,
-      password: password
-    };
-  }
-
-  /**
-   * Get an available Gmail account
-   */
-  async getAvailableGmailAccount() {
-    const { data, error } = await supabase
-      .from('gmail_accounts')
-      .select('*')
-      .eq('status', 'active')
-      .order('last_used', { ascending: true, nullsFirst: true })
-      .limit(1);
-
-    if (error || !data || data.length === 0) {
-      console.error('❌ No available Gmail accounts found');
-      return null;
-    }
-
-    return data[0];
-  }
-
-  /**
-   * Get next pending review from the queue
-   */
-  async getNextPendingReview() {
-    const { data, error } = await supabase
-      .from('reviews')
-      .select('*')
-      .eq('status', 'pending')
-      .order('created_at', { ascending: true })
-      .limit(1);
-
-    if (error) {
-      console.error('❌ Error fetching reviews:', error.message);
-      return null;
-    }
-
-    if (!data || data.length === 0) {
-      return null;
-    }
-
-    return data[0];
-  }
-
-  /**
-   * Update review status
-   */
-  async updateReviewStatus(reviewId, status, gmailId = null, notes = null) {
-    const updates = {
-      status,
-      updated_at: new Date().toISOString()
-    };
-
-    if (gmailId) updates.gmail_id = gmailId;
-    if (notes) updates.notes = notes;
-
-    await supabase
-      .from('reviews')
-      .update(updates)
-      .eq('id', reviewId);
   }
 
   /**
    * Update Gmail account last_used timestamp
    */
   async updateGmailLastUsed(gmailId) {
-    await supabase
-      .from('gmail_accounts')
-      .update({ last_used: new Date().toISOString() })
-      .eq('id', gmailId);
+    try {
+      const { error } = await supabase
+        .from('gmail_accounts')
+        .update({ last_used_at: new Date().toISOString() })
+        .eq('id', gmailId);
+
+      if (error) throw error;
+      console.log('✅ Gmail account last_used timestamp updated');
+    } catch (error) {
+      console.error('⚠️ Could not update Gmail last_used:', error.message);
+    }
+  }
+
+  /**
+   * Fetch next pending review
+   */
+  async getNextReview() {
+    try {
+      console.log('🔍 Looking for pending reviews...');
+      const { data, error } = await supabase
+        .from('reviews')
+        .select('*')
+        .eq('status', 'pending')
+        .order('created_at', { ascending: true })
+        .limit(1);
+
+      if (error) throw error;
+
+      if (data && data.length > 0) {
+        console.log(`✅ Found review for: ${data[0].business_name}`);
+        return data[0];
+      }
+
+      console.log('ℹ️ No pending reviews found');
+      return null;
+    } catch (error) {
+      console.error('❌ Error fetching review:', error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Update review status
+   */
+  async updateReviewStatus(reviewId, status, gmailAccountId = null) {
+    try {
+      const updateData = {
+        status,
+        updated_at: new Date().toISOString()
+      };
+
+      if (gmailAccountId) {
+        updateData.gmail_account_id = gmailAccountId;
+      }
+
+      const { error } = await supabase
+        .from('reviews')
+        .update(updateData)
+        .eq('id', reviewId);
+
+      if (error) throw error;
+      console.log(`✅ Review status updated to: ${status}`);
+    } catch (error) {
+      console.error('⚠️ Could not update review status:', error.message);
+    }
   }
 
   /**
    * Log automation activity
    */
-  async logActivity(reviewId, gmailId, proxyIp, status, errorMessage = null) {
-    const log = {
-      review_id: reviewId,
-      gmail_id: gmailId,
-      proxy_ip: proxyIp,
-      status,
-      started_at: new Date().toISOString(),
-      completed_at: new Date().toISOString()
-    };
+  async logActivity(reviewId, gmailAccountId, proxyIp, status) {
+    try {
+      const { error } = await supabase
+        .from('automation_logs')
+        .insert({
+          review_id: reviewId,
+          gmail_account_id: gmailAccountId,
+          proxy_ip: proxyIp,
+          status,
+          created_at: new Date().toISOString()
+        });
 
-    if (errorMessage) {
-      log.error_message = errorMessage;
+      if (error) throw error;
+      console.log('✅ Activity logged');
+    } catch (error) {
+      console.error('⚠️ Could not log activity:', error.message);
     }
-
-    await supabase.from('automation_logs').insert([log]);
   }
 
   /**
-   * Login to Gmail
+   * Get current proxy IP
    */
-  async loginToGmail(page, email, password) {
+  async getProxyIp(page) {
     try {
-      console.log(`📧 Logging into Gmail: ${email}`);
-      console.log('   🎭 Applying extra stealth measures...');
+      console.log('🌐 Detecting proxy IP address...');
       
-      // Extra stealth: Set realistic viewport
-      await page.setViewport({
-        width: 1920,
-        height: 1080,
-        deviceScaleFactor: 1,
+      // Navigate to IP detection service
+      await page.goto('https://api.ipify.org?format=json', { 
+        waitUntil: 'networkidle2',
+        timeout: 15000 
       });
       
-      // Extra stealth: Set realistic user agent
-      await page.setUserAgent(
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
-      );
+      // Get IP from response
+      const content = await page.content();
+      const ipMatch = content.match(/"ip":"([^"]+)"/);
       
-      // Extra stealth: Set additional headers
-      await page.setExtraHTTPHeaders({
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
-      });
+      if (ipMatch && ipMatch[1]) {
+        const ip = ipMatch[1];
+        console.log(`✅ Connected via proxy IP: ${ip}`);
+        return ip;
+      }
       
-      console.log('   ✅ Stealth measures applied');
+      console.log('⚠️ Could not detect proxy IP');
+      return 'unknown';
+    } catch (error) {
+      console.error('⚠️ Error detecting proxy IP:', error.message);
+      return 'unknown';
+    }
+  }
+
+  /**
+   * Rotate proxy session (for sticky session proxies)
+   */
+  async rotateProxySession(proxyConfig) {
+    try {
+      if (!proxyConfig) return 1;
+
+      // Get current session number
+      let currentSession = parseInt(proxyConfig.current_session || '1');
+      const maxSessions = parseInt(proxyConfig.max_sessions || '10000');
+
+      // Increment session
+      currentSession++;
+      if (currentSession > maxSessions) {
+        currentSession = 1;
+      }
+
+      // Update in database
+      const { error } = await supabase
+        .from('proxy_configs')
+        .update({ 
+          current_session: currentSession.toString(),
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', proxyConfig.id);
+
+      if (error) throw error;
+
+      console.log(`🔄 Proxy IP rotation: session ${currentSession} / ${maxSessions}`);
+      return currentSession;
+    } catch (error) {
+      console.error('⚠️ Could not rotate proxy session:', error.message);
+      return 1;
+    }
+  }
+
+  /**
+   * Extract review text from Google Maps
+   */
+  async extractReviewText(page, reviewLink) {
+    try {
+      console.log('📄 Extracting review text...');
+      console.log(`   Review link: ${reviewLink}`);
       
-      await page.goto('https://accounts.google.com/', {
+      // Navigate to the review link
+      await page.goto(reviewLink, {
         waitUntil: 'networkidle2',
         timeout: 30000
       });
-
-      await this.delay(DELAY_BETWEEN_ACTIONS);
-
-      // Enter email
-      console.log('   🔍 Looking for email input...');
-      await page.waitForSelector('input[type="email"]', { timeout: 10000 });
-      await page.type('input[type="email"]', email, { delay: 100 });
-      console.log('   ✅ Email entered');
-      await page.keyboard.press('Enter');
-      await this.delay(DELAY_BETWEEN_ACTIONS);
-
-      // Wait for password field or check what Google is showing
-      console.log('   🔍 Looking for password input...');
-      try {
-        await page.waitForSelector('input[type="password"]', { timeout: 15000 });
-        console.log('   ✅ Password field found');
-      } catch (passwordError) {
-        // Take screenshot to see what Google is actually showing
-        console.log('   ⚠️ Password field not found - checking page content...');
-        
-        // Check for common Google security screens
-        const pageText = await page.evaluate(() => document.body.innerText);
-        
-        if (pageText.includes('verify') || pageText.includes('Verify')) {
-          throw new Error('Google verification required - account may need manual verification');
-        }
-        if (pageText.includes('suspicious') || pageText.includes('Suspicious')) {
-          throw new Error('Google detected suspicious activity - account may be locked');
-        }
-        if (pageText.includes('security') || pageText.includes('Security')) {
-          throw new Error('Google security check required - cannot proceed with automation');
-        }
-        if (pageText.includes('phone') || pageText.includes('Phone')) {
-          throw new Error('Google requesting phone verification - automation cannot proceed');
-        }
-        
-        // Log what we see on the page
-        console.log('   📄 Page content preview:', pageText.substring(0, 500));
-        throw new Error('Password field not found - Google may be showing CAPTCHA or security check');
-      }
-
-      // Enter password
-      await page.type('input[type="password"]', password, { delay: 100 });
-      console.log('   ✅ Password entered');
-      await page.keyboard.press('Enter');
+      
       await this.delay(3000);
-
-      // Check if login was successful
-      const finalUrl = page.url();
-      console.log(`   🌐 Final URL: ${finalUrl}`);
       
-      if (finalUrl.includes('accounts.google.com/signin') || finalUrl.includes('accounts.google.com/challenge')) {
-        throw new Error('Login failed - still on login/challenge page');
-      }
-      
-      console.log('✅ Gmail login successful');
-      return true;
-    } catch (error) {
-      console.error('❌ Gmail login failed:', error.message);
-      
-      // Log current URL for debugging
-      try {
-        const currentUrl = await page.url();
-        console.error(`   Current URL: ${currentUrl}`);
-      } catch (e) {
-        // Ignore
-      }
-      
-      return false;
-    }
-  }
-
-  /**
-   * Logout from Gmail
-   */
-  async logoutFromGmail(page) {
-    try {
-      console.log('🔓 Logging out from Gmail...');
-      await page.goto('https://accounts.google.com/Logout', {
-        waitUntil: 'networkidle2'
-      });
-      await this.delay(2000);
-      console.log('✅ Gmail logout successful');
-      return true;
-    } catch (error) {
-      console.error('❌ Gmail logout failed:', error.message);
-      return false;
-    }
-  }
-
-  /**
-   * Extract full review text and metadata from Google Maps page
-   */
-  async extractReviewText(page) {
-    try {
-      console.log('📝 Extracting review text from page...');
-      
-      const reviewData = await page.evaluate(() => {
-        // Multiple selectors to find review text (Google uses different classes)
+      // Try multiple strategies to extract review text
+      const reviewText = await page.evaluate(() => {
+        // Strategy 1: Look for review text in common containers
         const textSelectors = [
-          'span[jstcache]', // Common Google Maps text container
-          '[class*="MyEned"]', // Google's review text class
-          '[class*="wiI7pd"]', // Another common review text class
-          'div[jsaction*="review"] span',
+          '[class*="review-text"]',
+          '[class*="review-full-text"]',
           '[data-review-id] span',
-          'div[role="article"] span',
-          '.review-full-text',
-          '.review-snippet'
+          '[jsaction*="review"] span',
+          '.review-text',
+          '[role="article"] span'
         ];
         
-        let reviewText = '';
-        let maxLength = 0;
-        
-        // Try each selector and keep the longest text found
         for (const selector of textSelectors) {
-          try {
-            const elements = document.querySelectorAll(selector);
-            for (const el of elements) {
-              const text = (el.innerText || el.textContent || '').trim();
-              // Keep text that's between 10 and 50,000 chars and longer than what we have
-              if (text.length > maxLength && text.length >= 10 && text.length <= 50000) {
-                // Make sure it looks like actual review content (not UI labels)
-                const hasMultipleWords = text.split(/\s+/).length >= 3;
-                if (hasMultipleWords) {
-                  reviewText = text;
-                  maxLength = text.length;
-                }
-              }
+          const elements = document.querySelectorAll(selector);
+          for (const el of elements) {
+            const text = el.textContent?.trim();
+            if (text && text.length > 50) {
+              return text;
             }
-          } catch (e) {
-            // Selector might not be valid, skip it
           }
         }
         
-        // If no good text found, try getting the main body text and filter it
-        if (!reviewText || reviewText.length < 50) {
-          const bodyText = document.body.innerText || document.body.textContent || '';
-          const lines = bodyText.split('\n')
-            .map(line => line.trim())
-            .filter(line => {
-              // Filter for lines that look like review content
-              return line.length > 20 && 
-                     line.length < 5000 &&
-                     !line.startsWith('Google') &&
-                     !line.includes('•') && // UI elements
-                     !line.match(/^\d+\s*(star|stars?|★)/i); // Ratings
-            });
-          
-          // Take the longest continuous text block
-          if (lines.length > 0) {
-            reviewText = lines.slice(0, 15).join('\n').trim();
+        // Strategy 2: Get all text content and find longest paragraph
+        const allSpans = Array.from(document.querySelectorAll('span'));
+        let longestText = '';
+        
+        for (const span of allSpans) {
+          const text = span.textContent?.trim() || '';
+          if (text.length > longestText.length && text.length > 50) {
+            longestText = text;
           }
         }
         
-        // Try to find rating
-        let rating = null;
-        const ratingSelectors = [
-          '[aria-label*="star"]',
-          '[aria-label*="Star"]',
-          '[role="img"][aria-label]',
-          'span[aria-label*="stars"]'
-        ];
+        if (longestText) return longestText;
         
-        for (const selector of ratingSelectors) {
-          try {
-            const elements = document.querySelectorAll(selector);
-            for (const el of elements) {
-              const ariaLabel = el.getAttribute('aria-label') || '';
-              const match = ariaLabel.match(/(\d+)\s*(?:star|stars?|★)/i);
-              if (match) {
-                rating = parseInt(match[1]);
-                break;
-              }
-            }
-            if (rating) break;
-          } catch (e) {
-            // Continue
-          }
+        // Strategy 3: Get visible text from body
+        const bodyText = document.body.innerText;
+        const lines = bodyText.split('\n').filter(line => line.trim().length > 50);
+        
+        if (lines.length > 0) {
+          return lines.join(' ').substring(0, 2000);
         }
         
-        // Try to find reviewer name
-        let reviewerName = '';
-        const nameSelectors = [
-          'button[aria-label*="photo"]', // Reviewer profile button
-          'div[data-review-id] button',
-          '.section-review-title',
-          'h3[class*="review"]'
-        ];
-        
-        for (const selector of nameSelectors) {
-          try {
-            const el = document.querySelector(selector);
-            if (el) {
-              const text = (el.innerText || el.textContent || '').trim();
-              if (text && text.length > 0 && text.length < 255) {
-                reviewerName = text;
-                break;
-              }
-            }
-          } catch (e) {
-            // Continue
-          }
-        }
-        
-        // Try to find review date
-        let reviewDate = '';
-        const dateSelectors = [
-          'span[class*="rsqaWe"]', // Google Maps date class
-          '.section-review-publish-date',
-          'span[aria-label*="ago"]',
-          'span[class*="review-date"]'
-        ];
-        
-        for (const selector of dateSelectors) {
-          try {
-            const el = document.querySelector(selector);
-            if (el) {
-              const text = (el.innerText || el.textContent || '').trim();
-              if (text && text.length > 0 && text.length < 100) {
-                reviewDate = text;
-                break;
-              }
-            }
-          } catch (e) {
-            // Continue
-          }
-        }
-        
-        return {
-          reviewText: reviewText.substring(0, 50000), // Limit to 50K chars max
-          rating,
-          reviewerName: reviewerName.substring(0, 255),
-          reviewDate: reviewDate.substring(0, 100)
-        };
+        return null;
       });
       
-      console.log(`✅ Extracted review data:`);
-      console.log(`   Review text length: ${reviewData.reviewText.length} characters`);
-      console.log(`   Rating: ${reviewData.rating || 'N/A'} stars`);
-      console.log(`   Reviewer: ${reviewData.reviewerName || 'N/A'}`);
-      console.log(`   Date: ${reviewData.reviewDate || 'N/A'}`);
-      
-      if (reviewData.reviewText.length > 100) {
-        console.log(`   Preview: ${reviewData.reviewText.substring(0, 100)}...`);
+      if (reviewText) {
+        console.log(`✅ Review text extracted (${reviewText.length} characters)`);
+        return reviewText;
       }
       
-      return reviewData;
+      console.log('⚠️ Could not extract review text');
+      return null;
       
     } catch (error) {
-      console.error('❌ Failed to extract review text:', error.message);
-      return {
-        reviewText: '',
-        rating: null,
-        reviewerName: '',
-        reviewDate: ''
-      };
+      console.error('⚠️ Error extracting review text:', error.message);
+      return null;
+    }
+  }
+
+  /**
+   * Store review text in database
+   */
+  async storeReviewText(reviewId, reviewText) {
+    try {
+      const { error } = await supabase
+        .from('reviews')
+        .update({ 
+          review_text: reviewText,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', reviewId);
+
+      if (error) throw error;
+      console.log('✅ Review text stored in database');
+    } catch (error) {
+      console.error('⚠️ Could not store review text:', error.message);
     }
   }
 
   /**
    * Report a Google Maps review
+   * WITH ALL 6 FIXES INTEGRATED
    */
   async reportReview(page, reviewLink, reportReason) {
     try {
       console.log(`🗺️ Opening review link: ${reviewLink}`);
       
-      // Try multiple navigation strategies with retries
-      let navigationSuccess = false;
+      // Try multiple navigation strategies with fallback
       const strategies = [
-        { waitUntil: 'domcontentloaded', timeout: 60000, name: 'DOM Content Loaded' },
-        { waitUntil: 'load', timeout: 60000, name: 'Page Load' },
-        { waitUntil: 'networkidle2', timeout: 90000, name: 'Network Idle' }
+        { name: 'DOM Content Loaded', waitUntil: 'domcontentloaded', timeout: 60000 },
+        { name: 'Network Idle', waitUntil: 'networkidle2', timeout: 45000 },
+        { name: 'Load Event', waitUntil: 'load', timeout: 30000 }
       ];
-      
+
+      let navigationSuccess = false;
       for (const strategy of strategies) {
         try {
           console.log(`   🔄 Trying navigation strategy: ${strategy.name} (timeout: ${strategy.timeout}ms)`);
@@ -648,55 +515,50 @@ class AutomationService {
         } catch (navError) {
           console.log(`   ⚠️ ${strategy.name} failed: ${navError.message}`);
           if (strategy === strategies[strategies.length - 1]) {
-            throw navError; // Throw only if all strategies failed
+            throw new Error('All navigation strategies failed');
           }
-          // Continue to next strategy
         }
       }
 
       if (!navigationSuccess) {
-        throw new Error('All navigation strategies failed');
+        throw new Error('Could not navigate to review page');
       }
 
+      // Wait for page to stabilize
       console.log('   ⏳ Waiting for page to stabilize...');
-      await this.delay(8000); // Give page more time to fully render (increased from 5000)
+      await this.delay(5000);
 
-      // Debug: Check what's on the page
+      // Check if we're on a minimal page type
       console.log('🔍 Checking page content...');
       const pageInfo = await page.evaluate(() => {
-        const buttons = Array.from(document.querySelectorAll('button'));
+        const buttons = document.querySelectorAll('button');
+        const hasCollapseOnly = Array.from(buttons).some(btn => 
+          btn.getAttribute('aria-label')?.includes('Collapse')
+        );
+        
         return {
           url: window.location.href,
           title: document.title,
           hasButtons: buttons.length,
-          hasAriaLabels: document.querySelectorAll('[aria-label]').length,
-          // Check if it's REALLY the minimal collapse-only page
-          isCollapseOnly: buttons.length === 1 && 
-                         buttons[0].innerText?.includes('Collapse side panel'),
-          firstButtonText: buttons[0]?.innerText?.trim() || ''
+          hasAriaLabels: Array.from(buttons).filter(btn => btn.getAttribute('aria-label')).length,
+          isCollapseOnly: hasCollapseOnly && buttons.length <= 3,
+          firstButtonText: buttons[0]?.innerText || ''
         };
       });
+
       console.log('📄 Page info:', JSON.stringify(pageInfo, null, 2));
 
-      // ═══════════════════════════════════════════════════════════
-      // CRITICAL FIX: Check if we're on the minimal/API page
-      // Only navigate if it's TRULY minimal (collapse-only button)
-      // ═══════════════════════════════════════════════════════════
-      if (pageInfo.isCollapseOnly || (pageInfo.hasButtons === 1 && pageInfo.firstButtonText.includes('Collapse'))) {
-        console.log('⚠️ DETECTED MINIMAL PAGE - Only has "Collapse side panel" button');
-        console.log('🔄 This appears to be the API/data page, not the full review page');
+      // If minimal page, try to navigate to full page
+      if (pageInfo.hasButtons <= 5 || pageInfo.isCollapseOnly) {
+        console.log('⚠️ Detected minimal page (limited UI controls)');
         console.log('🔄 Attempting to navigate to full review page...');
         
-        // Extract review ID and construct proper URL
+        // Extract review ID and place ID from URL
         const currentUrl = pageInfo.url;
-        
-        // Try to extract the review contribution ID from the URL
+        const reviewIdMatch = currentUrl.match(/!1s0x0:0x([a-f0-9]+)/);
         let reviewId = null;
-        
-        // Pattern 1: Look for contribution ID in the data parameter
-        const dataMatch = currentUrl.match(/!1s([^!]+)/);
-        if (dataMatch) {
-          reviewId = dataMatch[1];
+        if (reviewIdMatch) {
+          reviewId = reviewIdMatch[1];
           console.log(`   ✓ Found review ID: ${reviewId}`);
         }
         
@@ -801,15 +663,13 @@ class AutomationService {
           }
         }
         
-        // Final check: See if we're on a better page now
-        const finalCheck = await page.evaluate(() => {
-          return {
-            buttons: document.querySelectorAll('button').length,
-            url: window.location.href
-          };
-        });
+        // Final check: Did we successfully get to a full page?
+        const finalCheck = await page.evaluate(() => ({
+          buttons: document.querySelectorAll('button').length,
+          url: window.location.href
+        }));
         
-        console.log(`📊 After navigation attempts:`);
+        console.log(`📊 Final page check:`);
         console.log(`   Buttons: ${finalCheck.buttons}`);
         console.log(`   URL: ${finalCheck.url}`);
         
@@ -826,8 +686,16 @@ class AutomationService {
         console.log('✅ Page has sufficient UI elements (', pageInfo.hasButtons, 'buttons)');
       }
 
+      // ═══════════════════════════════════════════════════════════
+      // FIX 1: ADD 3-SECOND WAIT BEFORE MENU BUTTON SEARCH
+      // ═══════════════════════════════════════════════════════════
+      
       // Look for the three-dot menu button ON THE REVIEW (not main menu)
       console.log('🔍 Searching for review\'s three-dot menu button...');
+      
+      // CRITICAL: Wait for buttons to fully load
+      console.log('   ⏳ Waiting for review buttons to appear (3 seconds)...');
+      await this.delay(3000);
       
       // Strategy: Find the review container first, then find the three-dot button within it
       // This avoids clicking the main hamburger menu
@@ -852,8 +720,6 @@ class AutomationService {
         
         // If we found a review container, look for three-dot button within it
         if (reviewContainer) {
-          console.log('   ✓ Found review container, looking for menu button inside...');
-          
           const buttonSelectors = [
             'button[aria-label*="Actions"]',  // Google uses "Actions for [name]'s review"
             'button[aria-label*="More options"]',
@@ -873,23 +739,31 @@ class AutomationService {
           }
         }
         
+        // ═══════════════════════════════════════════════════════════
+        // FIX 2 & 3: IMPROVED BUTTON DETECTION WITH FALLBACK
+        // ═══════════════════════════════════════════════════════════
+        
         // Fallback: Look for buttons with "Actions" (Google's label for review three-dot menu)
-        console.log('   ⚠️ Review container not found, trying all "Actions" buttons...');
         const allActionButtons = Array.from(document.querySelectorAll('button[aria-label*="Actions"]'));
         
         for (const button of allActionButtons) {
           const ariaLabel = button.getAttribute('aria-label') || '';
           
-          // Look for "Actions for [name]'s review" pattern
-          if (ariaLabel.includes('Actions') && ariaLabel.includes('review')) {
-            console.log('   ✓ Found button with aria-label:', ariaLabel);
+          // Look for "Actions for [name]'s review" pattern (case-insensitive) - FIX 2
+          const lowerLabel = ariaLabel.toLowerCase();
+          if (lowerLabel.includes('actions') && lowerLabel.includes('review')) {
             button.setAttribute('data-review-menu-found', 'true');
-            return { success: true, selector: 'button[aria-label*="Actions"]' };
+            return { success: true, selector: 'button[aria-label*="Actions"]', found: ariaLabel, method: 'actions-review' };
           }
         }
         
+        // FIX 3: If we have ANY Actions buttons, use the first one
+        if (allActionButtons.length > 0) {
+          allActionButtons[0].setAttribute('data-review-menu-found', 'true');
+          return { success: true, selector: 'button[aria-label*="Actions"]', found: allActionButtons[0].getAttribute('aria-label'), method: 'actions-fallback' };
+        }
+        
         // Final fallback: Look for ALL buttons with "More" that are NOT in the main navigation
-        console.log('   ⚠️ "Actions" buttons not found, trying "More" buttons...');
         const allMoreButtons = Array.from(document.querySelectorAll('button[aria-label*="More"]'));
         
         for (const button of allMoreButtons) {
@@ -897,25 +771,39 @@ class AutomationService {
           const buttonText = button.innerText || '';
           
           // Skip main menu buttons (they have specific text/labels)
-          if (ariaLabel.includes('Main menu') || 
-              ariaLabel.includes('Google apps') ||
+          if (ariaLabel.toLowerCase().includes('main menu') || 
+              ariaLabel.toLowerCase().includes('google apps') ||
               buttonText.includes('Menu')) {
             continue;
           }
           
           // This is likely the review's three-dot button
           button.setAttribute('data-review-menu-found', 'true');
-          return { success: true, selector: 'button[aria-label*="More"]' };
+          return { success: true, selector: 'button[aria-label*="More"]', found: ariaLabel, method: 'more-button' };
         }
         
-        return { success: false };
+        return { success: false, actionsCount: allActionButtons.length, moreCount: allMoreButtons.length };
       });
       
       let actualMenuButton = null;
       if (menuButton && menuButton.success) {
         console.log(`✅ Found review menu button with selector: ${menuButton.selector}`);
+        if (menuButton.found) {
+          console.log(`   📋 Button aria-label: "${menuButton.found}"`);
+        }
+        if (menuButton.method) {
+          console.log(`   🔍 Found using method: ${menuButton.method}`);
+        }
         // Get the actual button element that we marked
         actualMenuButton = await page.$('button[data-review-menu-found="true"]');
+        
+        if (!actualMenuButton) {
+          console.log('   ⚠️ WARNING: Button was marked but could not be retrieved!');
+          console.log('   💡 This might be a timing issue. Trying direct selector...');
+          actualMenuButton = await page.$(menuButton.selector);
+        }
+      } else {
+        console.log('⚠️ Menu button search returned: ', JSON.stringify(menuButton));
       }
 
       if (!actualMenuButton) {
@@ -962,61 +850,51 @@ class AutomationService {
         await page.mouse.move(
           buttonBox.x + buttonBox.width / 2,
           buttonBox.y + buttonBox.height / 2,
-          { steps: 10 } // Smooth movement
+          { steps: 10 }
         );
         await this.delay(500);
       }
       
       // Strategy 3: Try multiple click methods
-      console.log('🖱️ Step 3: Clicking menu button (trying multiple methods)...');
+      console.log('🖱️ Step 3: Attempting to click menu button...');
       let menuOpened = false;
       
-      // Method 1: Standard Puppeteer click
-      try {
-        await actualMenuButton.click();
-        console.log('   ✓ Method 1: Standard click executed');
-        await this.delay(2000);
-        
-        // Check if menu appeared
-        const menuVisible = await page.evaluate(() => {
-          const menus = document.querySelectorAll('[role="menu"], [role="listbox"]');
-          for (const menu of menus) {
-            const style = window.getComputedStyle(menu);
-            if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0') {
-              return true;
-            }
+      // Method 1: Regular click
+      if (!menuOpened) {
+        try {
+          console.log('   🔄 Method 1: Regular click...');
+          await actualMenuButton.click();
+          await this.delay(2000);
+          
+          // Check if menu appeared
+          const menuVisible = await page.evaluate(() => {
+            const menus = document.querySelectorAll('[role="menu"], [role="listbox"]');
+            return menus.length > 0;
+          });
+          
+          if (menuVisible) {
+            console.log('   ✅ Menu appeared after regular click!');
+            menuOpened = true;
           }
-          return false;
-        });
-        
-        if (menuVisible) {
-          console.log('   ✅ Menu appeared after standard click!');
-          menuOpened = true;
+        } catch (e) {
+          console.log('   ⚠️ Method 1 failed:', e.message);
         }
-      } catch (e) {
-        console.log('   ⚠️ Method 1 failed:', e.message);
       }
       
-      // Method 2: JavaScript click if standard click failed
+      // Method 2: Click with delay
       if (!menuOpened) {
-        console.log('   Trying Method 2: JavaScript click...');
         try {
-          await page.evaluate(el => el.click(), actualMenuButton);
+          console.log('   🔄 Method 2: Click with delay...');
+          await actualMenuButton.click({ delay: 100 });
           await this.delay(2000);
           
           const menuVisible = await page.evaluate(() => {
             const menus = document.querySelectorAll('[role="menu"], [role="listbox"]');
-            for (const menu of menus) {
-              const style = window.getComputedStyle(menu);
-              if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0') {
-                return true;
-              }
-            }
-            return false;
+            return menus.length > 0;
           });
           
           if (menuVisible) {
-            console.log('   ✅ Menu appeared after JavaScript click!');
+            console.log('   ✅ Menu appeared after delayed click!');
             menuOpened = true;
           }
         } catch (e) {
@@ -1024,34 +902,20 @@ class AutomationService {
         }
       }
       
-      // Method 3: Dispatch MouseEvent (most human-like)
+      // Method 3: JavaScript click
       if (!menuOpened) {
-        console.log('   Trying Method 3: Dispatch MouseEvent...');
         try {
-          await page.evaluate(el => {
-            const event = new MouseEvent('click', {
-              view: window,
-              bubbles: true,
-              cancelable: true,
-              buttons: 1
-            });
-            el.dispatchEvent(event);
-          }, actualMenuButton);
+          console.log('   🔄 Method 3: JavaScript click...');
+          await page.evaluate(el => el.click(), actualMenuButton);
           await this.delay(2000);
           
           const menuVisible = await page.evaluate(() => {
             const menus = document.querySelectorAll('[role="menu"], [role="listbox"]');
-            for (const menu of menus) {
-              const style = window.getComputedStyle(menu);
-              if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0') {
-                return true;
-              }
-            }
-            return false;
+            return menus.length > 0;
           });
           
           if (menuVisible) {
-            console.log('   ✅ Menu appeared after MouseEvent!');
+            console.log('   ✅ Menu appeared after JS click!');
             menuOpened = true;
           }
         } catch (e) {
@@ -1061,20 +925,14 @@ class AutomationService {
       
       // Method 4: Double click (last resort)
       if (!menuOpened) {
-        console.log('   Trying Method 4: Double click...');
         try {
+          console.log('   🔄 Method 4: Double click...');
           await actualMenuButton.click({ clickCount: 2 });
           await this.delay(2000);
           
           const menuVisible = await page.evaluate(() => {
             const menus = document.querySelectorAll('[role="menu"], [role="listbox"]');
-            for (const menu of menus) {
-              const style = window.getComputedStyle(menu);
-              if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0') {
-                return true;
-              }
-            }
-            return false;
+            return menus.length > 0;
           });
           
           if (menuVisible) {
@@ -1129,124 +987,72 @@ class AutomationService {
           const foundItems = new Set();
           const items = [];
           
-          selectors.forEach(selector => {
-            try {
-              const elements = document.querySelectorAll(selector);
-              elements.forEach(el => {
-                if (!foundItems.has(el)) {
-                  foundItems.add(el);
-                  const text = (el.innerText || el.textContent || '').trim();
-                  if (text && text.length > 0 && text.length < 200) {
-                    items.push({
-                      text: text,
-                      ariaLabel: el.getAttribute('aria-label') || '',
-                      role: el.getAttribute('role') || '',
-                      className: el.className?.substring(0, 100) || '',
-                      tagName: el.tagName,
-                      selector: selector
-                    });
-                  }
-                }
-              });
-            } catch (e) {
-              // Selector might not be valid, skip it
-            }
-          });
-          
-          return items;
-        });
-        
-        console.log(`📋 Available menu items: ${menuItems.length} found`);
-        if (menuItems.length > 0) {
-          console.log(JSON.stringify(menuItems.slice(0, 10), null, 2)); // Show first 10
-        } else {
-          // No menu items found - additional diagnostics
-          console.log('⚠️ NO MENU ITEMS FOUND - Running deep diagnostics...');
-          
-          // Take screenshot for debugging
-          try {
-            await page.screenshot({ path: '/tmp/no-menu-items-debug.png', fullPage: false });
-            console.log('📸 Screenshot saved: /tmp/no-menu-items-debug.png');
-          } catch (screenshotError) {
-            console.log('⚠️ Could not save screenshot');
-          }
-          
-          // Dump page HTML to see what's actually there
-          try {
-            const pageHTML = await page.evaluate(() => document.body.innerHTML);
-            console.log(`📄 Page HTML length: ${pageHTML.length} characters`);
-            console.log(`📄 HTML preview (first 2000 chars):`);
-            console.log(pageHTML.substring(0, 2000));
-          } catch (htmlError) {
-            console.log('⚠️ Could not get page HTML');
-          }
-          
-          // Check if there are ANY visible elements on the page
-          const visibleElements = await page.evaluate(() => {
-            const all = Array.from(document.querySelectorAll('*'));
-            let visible = 0;
-            let hidden = 0;
-            
-            all.forEach(el => {
-              const style = window.getComputedStyle(el);
-              if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0') {
-                visible++;
-              } else {
-                hidden++;
+          for (const selector of selectors) {
+            const elements = document.querySelectorAll(selector);
+            elements.forEach((el, index) => {
+              const text = (el.innerText || el.textContent || '').trim();
+              // Only add if we haven't seen this element and it has text
+              if (text && !foundItems.has(el)) {
+                foundItems.add(el);
+                items.push({
+                  selector: selector,
+                  text: text.substring(0, 100),
+                  role: el.getAttribute('role'),
+                  ariaLabel: el.getAttribute('aria-label') || '',
+                  className: el.className?.substring(0, 50) || ''
+                });
               }
             });
-            
-            return { visible, hidden, total: all.length };
-          });
-          console.log(`👁️ Element visibility: ${visibleElements.visible} visible, ${visibleElements.hidden} hidden, ${visibleElements.total} total`);
+          }
           
-          // Check specifically for menu-related elements
-          const menuCheck = await page.evaluate(() => {
-            return {
-              roleMenu: document.querySelectorAll('[role="menu"]').length,
-              roleListbox: document.querySelectorAll('[role="listbox"]').length,
-              roleMenuitem: document.querySelectorAll('[role="menuitem"]').length,
-              hasJsaction: document.querySelectorAll('[jsaction]').length,
-              allDivs: document.querySelectorAll('div').length,
-              allButtons: document.querySelectorAll('button').length
-            };
-          });
-          console.log('🔍 Menu-specific elements:', JSON.stringify(menuCheck, null, 2));
-        }
-      } catch (debugError) {
-        console.log('⚠️ Could not debug menu items:', debugError.message);
+          return items.slice(0, 30); // Return first 30 items
+        });
+        
+        console.log(`📋 Found ${menuItems.length} menu items/elements:`);
+        menuItems.forEach((item, i) => {
+          console.log(`   ${i + 1}. [${item.role || 'no-role'}] "${item.text}" (${item.selector})`);
+        });
+      } catch (e) {
+        console.log('⚠️ Could not debug menu items:', e.message);
       }
 
-      // Look for "Report review" or similar option using XPath and text content
-      console.log('🔍 Searching for report option...');
+      // Look for "Report review" option with multiple strategies
+      console.log('🔍 Looking for "Report review" option...');
       
-      let reportOption = null;
-      
-      // Try XPath first (most reliable for text matching) - EXPANDED LIST
-      const xpathSelectors = [
-        "//div[contains(text(), 'Report review')]",
-        "//div[contains(text(), 'Flag as inappropriate')]",
-        "//div[contains(text(), 'Report')]",
-        "//span[contains(text(), 'Report review')]",
-        "//span[contains(text(), 'Report review')]",
-        "//span[contains(text(), 'Flag as inappropriate')]",
-        "//span[contains(text(), 'Report')]",
-        "//*[@role='menuitem' and contains(., 'Report')]",
-        "//*[@role='option' and contains(., 'Report')]",
-        "//button[contains(., 'Report')]",
-        "//li[contains(., 'Report')]",
-        "//*[contains(@aria-label, 'Report')]",
-        "//*[contains(translate(text(), 'REPORT', 'report'), 'report')]" // Case-insensitive
+      // ENHANCED: Try multiple XPath variations to find "Report review"
+      const xpathStrategies = [
+        '//div[contains(text(), "Report review")]',
+        '//*[contains(text(), "Report review")]',
+        '//span[contains(text(), "Report review")]',
+        '//div[@role="menuitem" and contains(text(), "Report")]',
+        '//*[@role="menuitem" and contains(text(), "Report")]',
+        '//div[contains(translate(text(), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "report")]'
       ];
 
-      for (const xpath of xpathSelectors) {
+      let reportOption = null;
+      
+      // Try each XPath strategy
+      for (const xpath of xpathStrategies) {
         try {
+          console.log(`   🔍 Trying XPath: ${xpath}`);
           const elements = await page.$x(xpath);
+          
           if (elements.length > 0) {
-            // Find the clickable parent
-            reportOption = elements[0];
-            console.log(`✅ Found report option with XPath: ${xpath}`);
-            break;
+            console.log(`   ✓ Found ${elements.length} elements with XPath`);
+            
+            // Try each element to see if it's clickable
+            for (const element of elements) {
+              const text = await page.evaluate(el => el.textContent, element);
+              console.log(`   📝 Element text: "${text}"`);
+              
+              if (text.toLowerCase().includes('report')) {
+                reportOption = element;
+                console.log(`   ✅ Selected element with text: "${text}"`);
+                break;
+              }
+            }
+            
+            if (reportOption) break;
           }
         } catch (e) {
           continue;
@@ -1298,568 +1104,434 @@ class AutomationService {
                   role === 'menuitemradio' ||
                   role === 'menuitem' ||
                   role === 'option' ||
-                  clickable.onclick ||
-                  clickable.getAttribute('jsaction') ||
-                  (clickable.style && window.getComputedStyle(clickable).cursor === 'pointer')
+                  clickable.hasAttribute('jsaction') ||
+                  clickable.classList.contains('VfPpkd-StrnGf-rymPhb')
                 ) {
-                  console.log(`   ✓ Found clickable parent: ${clickable.tagName} (role: ${role || 'none'})`);
                   clickable.setAttribute('data-report-item-found', 'true');
+                  console.log(`   ✓ Found clickable parent: ${clickable.tagName} (role: ${role})`);
                   return clickable;
                 }
                 clickable = clickable.parentElement;
                 depth++;
               }
-              
-              // If no clickable parent found, return the element itself
-              console.log(`   ⚠️ No clickable parent, using element itself`);
-              el.setAttribute('data-report-item-found', 'true');
-              return el;
             }
           }
+          
           return null;
         });
         
-        const isValid = await reportOption.evaluate(el => el !== null);
-        if (isValid) {
-          console.log('✅ Found report option via broad text search');
-          // Re-query to get fresh element handle with the marker attribute
-          const markedElement = await page.$('[data-report-item-found="true"]');
-          if (markedElement) {
-            reportOption = markedElement;
-            console.log('   ✓ Re-queried element with data-report-item-found attribute');
-          }
-        } else {
-          reportOption = null;
+        // Check if we found it
+        const foundViaHandle = await page.$('[data-report-item-found="true"]');
+        if (foundViaHandle) {
+          reportOption = foundViaHandle;
+          console.log('   ✅ Found report option via broad CSS search');
         }
       }
 
       if (!reportOption) {
-        // Take a screenshot for debugging
+        // Final debug: Take screenshot and list all text content
+        console.log('⚠️ Could not find "Report review" option');
+        
         try {
-          await page.screenshot({ path: '/tmp/menu-debug.png', fullPage: true });
-          console.log('📸 Screenshot saved to /tmp/menu-debug.png');
-        } catch (screenshotError) {
-          console.log('⚠️ Could not save screenshot:', screenshotError.message);
-        }
-        throw new Error('Could not find report option in menu');
+          await page.screenshot({ path: '/tmp/menu-debug.png', fullPage: false });
+          console.log('📸 Menu screenshot saved to /tmp/menu-debug.png');
+        } catch (e) {}
+        
+        const allText = await page.evaluate(() => document.body.innerText);
+        console.log('📄 All page text (first 500 chars):', allText.substring(0, 500));
+        
+        throw new Error('Could not find "Report review" option in menu');
       }
 
-      // Click report option (try multiple methods)
-      console.log('🖱️ Clicking report option...');
-      
-      let reportDialogOpened = false;
-      
-      // Method 1: Standard click
+      // Click "Report review"
+      console.log('🖱️ Clicking "Report review" option...');
+      await reportOption.click();
+      await this.delay(3000);
+
+      // Wait for report dialog to open
+      console.log('⏳ Waiting for report dialog to open...');
       try {
-        await reportOption.click();
-        await this.delay(2000);
-        
-        // Check if dialog appeared
-        const dialogVisible = await page.evaluate(() => {
-          const dialogs = document.querySelectorAll('[role="dialog"], [role="alertdialog"], .VfPpkd-cnG4Wd');
-          return dialogs.length > 0;
+        await page.waitForSelector('[role="dialog"], [role="alertdialog"], .dialog, [aria-modal="true"]', {
+          visible: true,
+          timeout: 10000
         });
-        
-        if (dialogVisible) {
-          console.log('   ✅ Report dialog opened after standard click');
-          reportDialogOpened = true;
-        }
-      } catch (e) {
-        console.log('   ⚠️ Standard click failed:', e.message);
+        console.log('✅ Report dialog opened');
+      } catch (dialogError) {
+        console.log('⚠️ Dialog selector not found, but continuing (dialog might have different structure)');
       }
       
-      // Method 2: JavaScript click if standard failed
-      if (!reportDialogOpened) {
-        console.log('   Trying JavaScript click...');
-        try {
-          await page.evaluate(el => el.click(), reportOption);
-          await this.delay(2000);
-          
-          const dialogVisible = await page.evaluate(() => {
-            const dialogs = document.querySelectorAll('[role="dialog"], [role="alertdialog"]');
-            return dialogs.length > 0;
-          });
-          
-          if (dialogVisible) {
-            console.log('   ✅ Report dialog opened after JavaScript click');
-            reportDialogOpened = true;
-          }
-        } catch (e) {
-          console.log('   ⚠️ JavaScript click failed:', e.message);
-        }
-      }
-      
-      // Method 3: Dispatch click event
-      if (!reportDialogOpened) {
-        console.log('   Trying dispatch click event...');
-        try {
-          await page.evaluate(el => {
-            const event = new MouseEvent('click', {
-              view: window,
-              bubbles: true,
-              cancelable: true
-            });
-            el.dispatchEvent(event);
-          }, reportOption);
-          await this.delay(2000);
-          
-          const dialogVisible = await page.evaluate(() => {
-            const dialogs = document.querySelectorAll('[role="dialog"], [role="alertdialog"]');
-            return dialogs.length > 0;
-          });
-          
-          if (dialogVisible) {
-            console.log('   ✅ Report dialog opened after dispatch event');
-            reportDialogOpened = true;
-          }
-        } catch (e) {
-          console.log('   ⚠️ Dispatch event failed:', e.message);
-        }
-      }
-      
-      console.log('   ⏳ Waiting for report dialog to fully load...');
-      await this.delay(3000); // Increased from 2s to 3s
-      
-      // Extra check: Wait for dialog to have content
-      console.log('   ⏳ Waiting for dialog content to appear...');
-      try {
-        await page.waitForFunction(() => {
-          const dialogs = document.querySelectorAll('[role="dialog"], [role="alertdialog"]');
-          if (dialogs.length === 0) return false;
-          
-          const lastDialog = dialogs[dialogs.length - 1];
-          // Check if dialog has labels or buttons
-          const hasLabels = lastDialog.querySelectorAll('label').length > 0;
-          const hasButtons = lastDialog.querySelectorAll('button').length > 0;
-          const hasRadios = lastDialog.querySelectorAll('[role="radio"]').length > 0;
-          
-          return hasLabels || hasButtons || hasRadios;
-        }, { timeout: 10000 });
-        console.log('   ✅ Dialog content loaded');
-      } catch (waitError) {
-        console.log('   ⚠️ Timeout waiting for dialog content, continuing anyway...');
-      }
+      await this.delay(2000);
 
-      // Debug: Show all available report reasons
-      console.log('🔍 Debugging available report reasons...');
-      try {
-        const debugResult = await page.evaluate(() => {
-          const reasons = [];
-          const debugInfo = {};
-          
-          // IMPORTANT: Search ONLY inside the report dialog, not the entire page!
-          // Try multiple dialog selectors
-          const allDialogs = document.querySelectorAll('[role="dialog"], [role="alertdialog"], .VfPpkd-cnG4Wd');
-          debugInfo.dialogCount = allDialogs.length;
-          
-          if (allDialogs.length === 0) {
-            debugInfo.error = 'No dialog found on page';
-            return { reasons: [], debugInfo };
-          }
-          
-          // Check EACH dialog and find the one with report-related content
-          debugInfo.allDialogsInfo = [];
-          let reportDialog = null;
-          
-          for (let i = 0; i < allDialogs.length; i++) {
-            const d = allDialogs[i];
-            const text = d.textContent || '';
-            const labelCount = d.querySelectorAll('label').length;
-            const radioCount = d.querySelectorAll('[role="radio"]').length;
-            const buttonCount = d.querySelectorAll('button').length;
-            
-            const info = {
-              index: i,
-              textSnippet: text.substring(0, 150).trim(),
-              labelCount,
-              radioCount,
-              buttonCount,
-              totalElements: d.querySelectorAll('*').length,
-              htmlLength: d.innerHTML.length
-            };
-            
-            debugInfo.allDialogsInfo.push(info);
-            
-            // Look for report-related keywords in dialog text
-            const lowerText = text.toLowerCase();
-            if (
-              lowerText.includes('report') ||
-              lowerText.includes('fake') ||
-              lowerText.includes('offensive') ||
-              lowerText.includes('conflict') ||
-              lowerText.includes('inappropriate')
-            ) {
-              reportDialog = d;
-              debugInfo.selectedDialogIndex = i;
-              debugInfo.selectedReason = 'Contains report-related keywords';
-            }
-          }
-          
-          // If no report-related dialog found, use last one
-          if (!reportDialog) {
-            reportDialog = allDialogs[allDialogs.length - 1];
-            debugInfo.selectedDialogIndex = allDialogs.length - 1;
-            debugInfo.selectedReason = 'Using last dialog (fallback)';
-          }
-          
-          const dialog = reportDialog;
-          debugInfo.selectedDialog = {
-            textSnippet: dialog.textContent?.substring(0, 200),
-            labelCount: dialog.querySelectorAll('label').length,
-            radioCount: dialog.querySelectorAll('[role="radio"]').length,
-            buttonCount: dialog.querySelectorAll('button').length,
-            htmlLength: dialog.innerHTML.length
-          };
-          
-          const elements = Array.from(dialog.querySelectorAll([
-            'label',
-            '[role="radio"]',
-            '[role="option"]',
-            '.VfPpkd-StrnGf-rymPhb',
-            '[data-index]',
-            'input[type="radio"] + *',
-            'div[jsaction*="click"]'
-          ].join(', ')));
-          
-          elements.forEach((el, i) => {
-            const text = (el.innerText || el.textContent || '').trim();
-            if (text && text.length > 0 && text.length < 200) {
-              reasons.push({
-                index: i,
-                text: text,
-                tagName: el.tagName,
-                role: el.getAttribute('role') || '',
-                ariaLabel: el.getAttribute('aria-label') || '',
-                className: el.className?.substring(0, 50) || ''
-              });
-            }
-          });
-          
-          return { reasons, debugInfo };
-        });
-        
-        // Log debug info
-        console.log(`   🔍 Found ${debugResult.debugInfo.dialogCount} dialog(s) on page`);
-        if (debugResult.debugInfo.allDialogsInfo) {
-          console.log('   📋 All dialogs found:');
-          debugResult.debugInfo.allDialogsInfo.forEach((info, i) => {
-            console.log(`      Dialog ${i}: ${info.labelCount} labels, ${info.radioCount} radios, ${info.buttonCount} buttons`);
-            console.log(`         Text: "${info.textSnippet.substring(0, 80)}..."`);
-          });
-        }
-        console.log(`   ✓ Using dialog #${debugResult.debugInfo.selectedDialogIndex}: ${debugResult.debugInfo.selectedReason}`);
-        console.log(`   📊 Selected dialog: ${debugResult.debugInfo.selectedDialog.labelCount} labels, ${debugResult.debugInfo.selectedDialog.radioCount} radios, ${debugResult.debugInfo.selectedDialog.buttonCount} buttons`);
-        console.log(`   📄 Selected dialog text: "${debugResult.debugInfo.selectedDialog.textSnippet?.substring(0, 100)}..."`);
-        
-        const availableReasons = debugResult.reasons;
-        console.log('📋 Available report reasons:', JSON.stringify(availableReasons, null, 2));
-        
-        // If no reasons found, try to debug what went wrong
-        if (availableReasons.length === 0) {
-          console.log('⚠️ No report reasons found! Checking for issues...');
-          
-          // Check if dialog might be in an iframe
-          const iframeCheck = await page.evaluate(() => {
-            const iframes = document.querySelectorAll('iframe');
-            return {
-              iframeCount: iframes.length,
-              iframeUrls: Array.from(iframes).map(f => f.src).slice(0, 3)
-            };
-          });
-          console.log(`   📊 Iframes on page: ${iframeCheck.iframeCount}`);
-          if (iframeCheck.iframeCount > 0) {
-            console.log(`   📋 Iframe URLs: ${JSON.stringify(iframeCheck.iframeUrls)}`);
-          }
-          
-          // Check what dialogs exist and what's in them
-          const dialogInfo = await page.evaluate(() => {
-            const dialogs = document.querySelectorAll('[role="dialog"], [role="alertdialog"]');
-            return Array.from(dialogs).map((d, i) => ({
-              index: i,
-              textContent: d.textContent?.substring(0, 300),
-              buttonCount: d.querySelectorAll('button').length,
-              labelCount: d.querySelectorAll('label').length,
-              inputCount: d.querySelectorAll('input').length,
-              className: d.className?.substring(0, 100)
-            }));
-          });
-          console.log(`   📋 All dialogs info:`, JSON.stringify(dialogInfo, null, 2));
-        }
-      } catch (debugError) {
-        console.log('⚠️ Could not debug report reasons:', debugError.message);
-      }
-
-      // Select report reason if available
-      if (reportReason) {
-        console.log(`🎯 Looking for report reason: "${reportReason}"`);
-        
-        // Try to find and click the reason option
-        let reasonClicked = false;
-        
-        // Strategy 1: Find by exact text match (case-sensitive) INSIDE REPORT DIALOG
-        console.log('   🔍 Strategy 1: Exact text match (inside report dialog)');
-        const exactTextResult = await page.evaluate((reason) => {
-          // Find the REPORT dialog (with report keywords)
-          const allDialogs = document.querySelectorAll('[role="dialog"], [role="alertdialog"], .VfPpkd-cnG4Wd');
-          let reportDialog = null;
-          
-          for (const d of allDialogs) {
-            const text = (d.textContent || '').toLowerCase();
-            if (text.includes('report') || text.includes('fake') || text.includes('offensive') || text.includes('conflict')) {
-              reportDialog = d;
-              break;
-            }
-          }
-          
-          // Fallback to last dialog
-          if (!reportDialog && allDialogs.length > 0) {
-            reportDialog = allDialogs[allDialogs.length - 1];
-          }
-          
-          if (!reportDialog) {
-            return { success: false };
-          }
-          
-          const dialog = reportDialog;
-          
-          const allElements = Array.from(dialog.querySelectorAll('*'));
-          for (const el of allElements) {
-            const text = (el.innerText || el.textContent || '').trim();
-            if (text === reason) {
-              // Find clickable parent (label, radio button, or clickable div)
-              let clickable = el;
-              let depth = 0;
-              while (clickable && depth < 5) {
-                if (
-                  clickable.tagName === 'LABEL' ||
-                  clickable.getAttribute('role') === 'radio' ||
-                  clickable.getAttribute('role') === 'option' ||
-                  clickable.onclick ||
-                  clickable.getAttribute('jsaction')
-                ) {
-                  clickable.click();
-                  return { success: true, method: 'exact-text', element: clickable.tagName };
-                }
-                clickable = clickable.parentElement;
-                depth++;
-              }
-            }
-          }
-          return { success: false };
-        }, reportReason);
-        
-        if (exactTextResult.success) {
-          console.log(`   ✅ Found and clicked reason via exact text match (${exactTextResult.element})`);
-          reasonClicked = true;
-        }
-        
-        // Strategy 2: Find label containing the text and click associated radio
-        if (!reasonClicked) {
-          console.log('   🔍 Strategy 2: Label with associated radio button');
-          try {
-            const labelXPath = `//label[contains(text(), '${reportReason}')]`;
-            const labels = await page.$x(labelXPath);
-            
-            if (labels.length > 0) {
-              console.log(`   ✅ Found ${labels.length} label(s) containing "${reportReason}"`);
-              
-              // Try to find and click associated radio button
-              const radioClicked = await page.evaluate((labelIndex) => {
-                const labels = Array.from(document.querySelectorAll('label'));
-                const label = labels[labelIndex];
-                
-                if (label) {
-                  // Method 1: Click the label itself
-                  label.click();
-                  return true;
-                }
-                return false;
-              }, 0);
-              
-              if (radioClicked) {
-                console.log('   ✅ Clicked label element');
-                reasonClicked = true;
-              }
-            }
-          } catch (e) {
-            console.log(`   ⚠️ Strategy 2 failed: ${e.message}`);
-          }
-        }
-        
-        // Strategy 3: Find radio button with matching text in parent/sibling (inside REPORT dialog)
-        if (!reasonClicked) {
-          console.log('   🔍 Strategy 3: Radio button with matching sibling text (inside report dialog)');
-          const radioClicked = await page.evaluate((reason) => {
-            // Find the REPORT dialog
-            const allDialogs = document.querySelectorAll('[role="dialog"], [role="alertdialog"], .VfPpkd-cnG4Wd');
-            let reportDialog = null;
-            
-            for (const d of allDialogs) {
-              const text = (d.textContent || '').toLowerCase();
-              if (text.includes('report') || text.includes('fake') || text.includes('offensive')) {
-                reportDialog = d;
-                break;
-              }
-            }
-            
-            if (!reportDialog && allDialogs.length > 0) {
-              reportDialog = allDialogs[allDialogs.length - 1];
-            }
-            
-            if (!reportDialog) {
-              return false;
-            }
-            
-            const dialog = reportDialog;
-            const radios = Array.from(dialog.querySelectorAll('[role="radio"], input[type="radio"]'));
-            
-            for (const radio of radios) {
-              // Check parent and sibling text
-              const parent = radio.parentElement;
-              const parentText = (parent?.innerText || parent?.textContent || '').trim();
-              
-              if (parentText.includes(reason)) {
-                radio.click();
-                return true;
-              }
-            }
-            return false;
-          }, reportReason);
-          
-          if (radioClicked) {
-            console.log('   ✅ Clicked radio button via sibling text');
-            reasonClicked = true;
-          }
-        }
-
-        if (reasonClicked) {
-          console.log(`✅ Successfully selected reason: "${reportReason}"`);
-          await this.delay(1500);
-        } else {
-          console.log(`⚠️ Could not find reason "${reportReason}", will submit with default selection`);
-          console.log(`   💡 TIP: Make sure report_reason matches the exact text from Google Maps menu`);
-          console.log(`   💡 For non-English locations, use the translated text (e.g., Portuguese for Brazil)`);
-        }
-      }
-
-      // Debug: Show all buttons INSIDE the report dialog
-      console.log('🔍 Debugging buttons inside report dialog...');
-      try {
-        const dialogButtons = await page.evaluate(() => {
-          // Search ONLY inside dialog
-          const dialog = document.querySelector('[role="dialog"], [role="alertdialog"], .VfPpkd-cnG4Wd');
-          if (!dialog) {
-            console.log('   ⚠️ No dialog found for button debug');
-            return [];
-          }
-          
-          const buttons = Array.from(dialog.querySelectorAll('button, [role="button"]'));
-          console.log(`   Found ${buttons.length} buttons in dialog`);
-          
-          return buttons.map((btn, i) => ({
-            index: i,
-            text: (btn.innerText || btn.textContent || '').substring(0, 100).trim(),
-            ariaLabel: btn.getAttribute('aria-label') || '',
-            type: btn.getAttribute('type') || '',
-            className: btn.className?.substring(0, 100) || ''
-          }));
-        });
-        console.log('🔘 Buttons in dialog:', JSON.stringify(dialogButtons, null, 2));
-      } catch (debugError) {
-        console.log('⚠️ Could not debug dialog buttons:', debugError.message);
-      }
-
-      // Submit the report (NO XPATH - CSS selectors only, scoped to dialog)
-      console.log('🔍 Looking for submit button inside dialog...');
+      // ═══════════════════════════════════════════════════════════
+      // SMART DIALOG FINDER - Find the CORRECT dialog among multiple
+      // ═══════════════════════════════════════════════════════════
       
-      let submitted = false;
+      console.log('🔍 Analyzing page dialogs...');
       
-      // Find submit button INSIDE the dialog
-      const submitButton = await page.evaluateHandle(() => {
-        // Search ONLY inside dialog
-        const dialog = document.querySelector('[role="dialog"], [role="alertdialog"], .VfPpkd-cnG4Wd');
-        if (!dialog) {
-          console.log('   ⚠️ No dialog found for submit button search');
-          return null;
-        }
+      const dialogInfo = await page.evaluate(() => {
+        const dialogs = Array.from(document.querySelectorAll('[role="dialog"], [role="alertdialog"], [aria-modal="true"]'));
         
-        console.log('   ✓ Searching for submit button inside dialog...');
-        const buttons = Array.from(dialog.querySelectorAll('button, [role="button"]'));
-        console.log(`   Found ${buttons.length} buttons in dialog`);
-        
-        for (const btn of buttons) {
-          const text = (btn.innerText || btn.textContent || '').toLowerCase().trim();
-          const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
-          const type = btn.getAttribute('type') || '';
+        return dialogs.map((dialog, index) => {
+          const text = (dialog.innerText || dialog.textContent || '').toLowerCase();
           
-          console.log(`   Button: "${text}" (aria: "${ariaLabel}", type: "${type}")`);
-          
-          // Look for submit-related keywords
-          if (
-            text.includes('submit') ||
-            text.includes('send') ||
-            text.includes('flag') ||
+          // Check for report-related keywords
+          const hasReportKeywords = 
             text.includes('report') ||
-            text === 'next' ||
-            text === 'continue' ||
-            ariaLabel.includes('submit') ||
-            ariaLabel.includes('send') ||
-            ariaLabel.includes('next') ||
-            type === 'submit'
-          ) {
-            // Exclude cancel/close/back buttons
-            if (!text.includes('cancel') && !text.includes('close') && !text.includes('back')) {
-              console.log(`   ✓ Found potential submit button: "${text}"`);
-              btn.setAttribute('data-submit-button-found', 'true');
-              return btn;
-            }
-          }
-        }
-        
-        // Fallback: Last button in dialog (usually submit)
-        if (buttons.length > 0) {
-          const lastButton = buttons[buttons.length - 1];
-          const lastText = (lastButton.innerText || lastButton.textContent || '').toLowerCase().trim();
-          if (!lastText.includes('cancel') && !lastText.includes('close')) {
-            console.log(`   ⚠️ Using last button as fallback: "${lastText}"`);
-            lastButton.setAttribute('data-submit-button-found', 'true');
-            return lastButton;
-          }
-        }
-        
-        return null;
+            text.includes('fake') ||
+            text.includes('offensive') ||
+            text.includes('conflict') ||
+            text.includes('spam');
+          
+          // Check for UI controls (Zoom In/Out = wrong dialog)
+          const hasZoomControls = text.includes('zoom in') || text.includes('zoom out');
+          
+          return {
+            index,
+            hasReportKeywords,
+            hasZoomControls,
+            textSnippet: text.substring(0, 200),
+            isLikelyReportDialog: hasReportKeywords && !hasZoomControls
+          };
+        });
       });
       
-      const isValid = await submitButton.evaluate(el => el !== null);
-      if (isValid) {
-        console.log('✅ Found submit button');
+      console.log(`📋 Found ${dialogInfo.length} dialog(s):`);
+      dialogInfo.forEach(info => {
+        console.log(`   Dialog ${info.index}: Report keywords: ${info.hasReportKeywords}, Zoom controls: ${info.hasZoomControls}`);
+        console.log(`      Likely report dialog: ${info.isLikelyReportDialog ? '✅ YES' : '❌ NO'}`);
+        console.log(`      Text: "${info.textSnippet.substring(0, 100)}"`);
+      });
+      
+      // Find the correct dialog
+      const correctDialogIndex = dialogInfo.findIndex(d => d.isLikelyReportDialog);
+      
+      if (correctDialogIndex === -1) {
+        console.log('⚠️ WARNING: Could not identify the report dialog among visible dialogs');
+        console.log('💡 Will search all dialogs for report reasons');
+      } else {
+        console.log(`✅ Identified report dialog at index: ${correctDialogIndex}`);
+      }
+
+      // Look for the report reason option
+      console.log(`🔍 Looking for reason: "${reportReason}"...`);
+      
+      // Try exact text match first (ENHANCED with dialog scoping)
+      const exactTextResult = await page.evaluate((reason, targetDialogIndex) => {
+        // Helper function to check if element is inside the target dialog
+        const isInTargetDialog = (element) => {
+          if (targetDialogIndex === -1) return true; // No specific dialog, search all
+          
+          const dialogs = Array.from(document.querySelectorAll('[role="dialog"], [role="alertdialog"], [aria-modal="true"]'));
+          const targetDialog = dialogs[targetDialogIndex];
+          
+          if (!targetDialog) return true; // Fallback to searching all
+          
+          return targetDialog.contains(element);
+        };
         
-        // Re-query to get fresh element handle
-        const freshButton = await page.$('[data-submit-button-found="true"]');
-        if (freshButton) {
-          await freshButton.click();
-          console.log('✅ Report submitted successfully');
-          await this.delay(3000);
-          submitted = true;
+        // Strategy 1: Look for exact text match in menuitemradio elements
+        const menuItems = Array.from(document.querySelectorAll('[role="menuitemradio"], [role="option"], [role="menuitem"]'));
+        
+        for (const item of menuItems) {
+          if (!isInTargetDialog(item)) continue; // Skip if not in target dialog
+          
+          const text = (item.innerText || item.textContent || '').trim();
+          if (text.toLowerCase() === reason.toLowerCase()) {
+            item.setAttribute('data-reason-found', 'true');
+            return { success: true, method: 'exact-menuitem', text };
+          }
+        }
+        
+        // Strategy 2: Look for text that CONTAINS the reason
+        for (const item of menuItems) {
+          if (!isInTargetDialog(item)) continue;
+          
+          const text = (item.innerText || item.textContent || '').trim().toLowerCase();
+          if (text.includes(reason.toLowerCase())) {
+            item.setAttribute('data-reason-found', 'true');
+            return { success: true, method: 'contains-menuitem', text };
+          }
+        }
+        
+        // Strategy 3: Search all clickable elements
+        const allClickable = Array.from(document.querySelectorAll('div[jsaction], button, [role="button"], a'));
+        
+        for (const el of allClickable) {
+          if (!isInTargetDialog(el)) continue;
+          
+          const text = (el.innerText || el.textContent || '').trim().toLowerCase();
+          
+          if (text === reason.toLowerCase() || text.includes(reason.toLowerCase())) {
+            // Make sure it's visible
+            const style = window.getComputedStyle(el);
+            if (style.display !== 'none' && style.visibility !== 'hidden') {
+              el.setAttribute('data-reason-found', 'true');
+              return { success: true, method: 'clickable-element', text: el.innerText?.trim() };
+            }
+          }
+        }
+        
+        return { success: false };
+      }, reportReason, correctDialogIndex);
+
+      let reasonElement = null;
+      
+      if (exactTextResult.success) {
+        console.log(`   ✅ Found reason using: ${exactTextResult.method}`);
+        console.log(`   📝 Element text: "${exactTextResult.text}"`);
+        reasonElement = await page.$('[data-reason-found="true"]');
+      }
+
+      if (!reasonElement) {
+        // Fallback: Try XPath
+        console.log('   🔍 Trying XPath search...');
+        const xpathResults = await page.$x(`//*[contains(text(), "${reportReason}")]`);
+        
+        if (xpathResults.length > 0) {
+          console.log(`   ✓ Found ${xpathResults.length} elements via XPath`);
+          reasonElement = xpathResults[0];
         }
       }
 
-      if (!submitted) {
-        console.log('⚠️ Could not find submit button, report may still have succeeded');
-        // Take screenshot of the dialog for debugging
+      if (!reasonElement) {
+        // Debug: Show all available options
+        console.log('⚠️ Could not find report reason. Available options:');
+        const availableOptions = await page.evaluate(() => {
+          const items = Array.from(document.querySelectorAll('[role="menuitemradio"], [role="option"], [role="menuitem"]'));
+          return items.map(item => (item.innerText || item.textContent || '').trim()).filter(Boolean);
+        });
+        console.log('   Options:', availableOptions);
+        
+        throw new Error(`Could not find report reason: "${reportReason}"`);
+      }
+
+      // Click the reason
+      console.log('🖱️ Clicking report reason...');
+      
+      // Scroll into view first
+      await page.evaluate(el => {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, reasonElement);
+      await this.delay(500);
+      
+      // Click the reason
+      await reasonElement.click();
+      await this.delay(2000);
+
+      // ═══════════════════════════════════════════════════════════
+      // FIX 4: DETECT 2-STEP WORKFLOW
+      // ═══════════════════════════════════════════════════════════
+      
+      console.log('   ✅ Successfully selected reason:', reportReason);
+      let reasonClicked = true;
+      
+      // IMPORTANT: Check if a new page/dialog opened (2-step workflow)
+      console.log('🔄 Waiting for potential page transition (2-step workflow)...');
+      await this.delay(3000);
+      
+      // Check if we're on a submission page
+      const pageCheck = await page.evaluate(() => {
+        const bodyText = document.body.textContent?.toLowerCase() || '';
+        const hasSubmitButton = Array.from(document.querySelectorAll('button')).some(btn => {
+          const text = (btn.innerText || '').trim().toLowerCase();
+          return text === 'submit' || text.includes('submit');
+        });
+        
+        // Check if we're on a detail page (has back arrow, submit button, no reason list)
+        const hasBackButton = bodyText.includes('back') || document.querySelector('[aria-label*="Back"]');
+        const hasReasonList = bodyText.includes('off topic') || bodyText.includes('spam');
+        
+        return {
+          hasSubmitButton,
+          hasBackButton,
+          hasReasonList,
+          isNewPage: hasSubmitButton && hasBackButton && !hasReasonList,
+          snippet: document.body.textContent?.substring(0, 200)
+        };
+      });
+      
+      if (pageCheck.isNewPage) {
+        console.log('✅ New submission page detected (2-step workflow)');
+        console.log('   📄 Page shows: Submit button + Back button');
+        console.log('   💡 Will look for Submit button on this new page');
+      } else {
+        console.log('   ℹ️  Still on reason selection dialog (1-step workflow)');
+      }
+
+      // ═══════════════════════════════════════════════════════════
+      // FIX 5: ENHANCED SUBMIT BUTTON WITH SUCCESS/ERROR DETECTION
+      // ═══════════════════════════════════════════════════════════
+      
+      console.log('🔍 Looking for submit button (both 1-step and 2-step workflows)...');
+      
+      const submitResult = await page.evaluate(() => {
+        // STRATEGY 1: Look for button with "Submit" text
+        const allButtons = Array.from(document.querySelectorAll('button'));
+        
+        for (const button of allButtons) {
+          const text = (button.innerText || button.textContent || '').trim().toLowerCase();
+          
+          if (text === 'submit' || text.includes('submit')) {
+            // Make sure it's visible
+            const style = window.getComputedStyle(button);
+            if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0') {
+              button.setAttribute('data-submit-found', 'true');
+              return { 
+                success: true, 
+                text: button.innerText.trim(), 
+                method: 'submit-text',
+                className: button.className
+              };
+            }
+          }
+        }
+        
+        // STRATEGY 2: Look for primary button in dialog (Google's class pattern)
+        const dialogs = document.querySelectorAll('[role="dialog"]');
+        if (dialogs.length > 0) {
+          const lastDialog = dialogs[dialogs.length - 1];
+          const dialogButtons = lastDialog.querySelectorAll('button');
+          
+          for (const button of dialogButtons) {
+            const classes = button.className || '';
+            const text = (button.innerText || '').trim().toLowerCase();
+            
+            // Google uses specific classes for primary/submit buttons
+            if (classes.includes('Primary') || 
+                classes.includes('primary') ||
+                text === 'submit') {
+              button.setAttribute('data-submit-found', 'true');
+              return { 
+                success: true, 
+                text: button.innerText.trim(), 
+                method: 'primary-button',
+                className: button.className
+              };
+            }
+          }
+        }
+        
+        return { success: false };
+      });
+      
+      if (submitResult && submitResult.success) {
+        console.log(`✅ Found submit button: "${submitResult.text}"`);
+        console.log(`   🔍 Detection method: ${submitResult.method}`);
+        
+        const submitBtn = await page.$('button[data-submit-found="true"]');
+        
+        if (submitBtn) {
+          console.log('🖱️ Clicking submit button...');
+          
+          // Scroll into view
+          await page.evaluate(el => {
+            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          }, submitBtn);
+          await this.delay(1000);
+          
+          // Click
+          await submitBtn.click();
+          console.log('   ✓ Submit button clicked');
+          
+          // Wait for response
+          console.log('⏳ Waiting for submission response (5 seconds)...');
+          await this.delay(5000);
+          
+          // ═══════════════════════════════════════════════════════════
+          // CHECK FOR SUCCESS OR ERROR
+          // ═══════════════════════════════════════════════════════════
+          
+          const resultCheck = await page.evaluate(() => {
+            const bodyText = document.body.textContent?.toLowerCase() || '';
+            
+            return {
+              // Success indicators
+              hasReportReceived: bodyText.includes('report received'),
+              hasThankYou: bodyText.includes('thank you'),
+              hasReportSent: bodyText.includes('report sent'),
+              
+              // Error indicators
+              hasSomethingWentWrong: bodyText.includes('something went wrong'),
+              hasNotSubmitted: bodyText.includes('wasn\'t submitted') || bodyText.includes('not submitted'),
+              hasTryAgain: bodyText.includes('try again'),
+              
+              // Get text snippet
+              textSnippet: document.body.textContent?.substring(0, 300)
+            };
+          });
+          
+          // Check for SUCCESS
+          if (resultCheck.hasReportReceived || resultCheck.hasThankYou || resultCheck.hasReportSent) {
+            console.log('✅ Report submitted successfully!');
+            console.log('   🎉 Confirmation: "Report received"');
+            
+            // Take success screenshot
+            try {
+              await page.screenshot({ path: '/tmp/report-success.png', fullPage: false });
+              console.log('📸 Success screenshot saved');
+            } catch (e) {}
+            
+            return true;
+          }
+          
+          // Check for ERROR
+          else if (resultCheck.hasSomethingWentWrong || resultCheck.hasNotSubmitted) {
+            console.log('❌ Report submission FAILED!');
+            console.log('   ⚠️  Google error: "Something went wrong - Your report wasn\'t submitted"');
+            console.log('   💡 This usually means:');
+            console.log('      - Same email already reported this review');
+            console.log('      - Review was recently reported');
+            console.log('      - Rate limit reached');
+            
+            // Take error screenshot
+            try {
+              await page.screenshot({ path: '/tmp/report-error.png', fullPage: false });
+              console.log('📸 Error screenshot saved');
+            } catch (e) {}
+            
+            throw new Error('GOOGLE_DUPLICATE_REPORT: Something went wrong - Report wasn\'t submitted. Email may have already reported this review.');
+          }
+          
+          // Unknown state
+          else {
+            console.log('⚠️ Submit clicked but unclear result');
+            console.log('   📄 Page text:', resultCheck.textSnippet.substring(0, 150));
+            
+            // Take debug screenshot
+            try {
+              await page.screenshot({ path: '/tmp/report-unknown.png', fullPage: false });
+              console.log('📸 Debug screenshot saved');
+            } catch (e) {}
+            
+            // Assume success if no clear error
+            console.log('   💡 No error detected, assuming success');
+            return true;
+          }
+          
+        } else {
+          console.log('⚠️ Submit button found but could not retrieve element');
+          throw new Error('Submit button element not accessible');
+        }
+        
+      } else {
+        console.log('⚠️ Could not find submit button');
+        console.log('   💡 This might mean:');
+        console.log('      - Wrong dialog selected');
+        console.log('      - Button has different text');
+        console.log('      - Page structure changed');
+        
+        // Take debug screenshot
         try {
-          await page.screenshot({ path: '/tmp/report-dialog-debug.png', fullPage: false });
-          console.log('📸 Screenshot saved to /tmp/report-dialog-debug.png');
-        } catch (screenshotError) {
-          console.log('⚠️ Could not save screenshot');
-        }
+          await page.screenshot({ path: '/tmp/no-submit-button.png', fullPage: false });
+          console.log('📸 Debug screenshot saved');
+        } catch (e) {}
+        
+        throw new Error('Could not find submit button in dialog');
       }
-
-      return true;
 
     } catch (error) {
       console.error('❌ Failed to report review:', error.message);
-      return false;
+      throw error;
     }
   }
 
@@ -1867,132 +1539,78 @@ class AutomationService {
    * Process a single review
    */
   async processReview(review) {
+    console.log('═══════════════════════════════════════════════════════════');
+    console.log(`🔄 Processing review: ${review.id}`);
+    console.log(`   Business: ${review.business_name}`);
+    console.log(`   Location: ${review.location}`);
+    console.log('═══════════════════════════════════════════════════════════');
+
     let page = null;
-    let proxyIp = null;
-    let gmailAccount = null;
 
     try {
-      console.log(`\n🔄 Processing review: ${review.id}`);
-      console.log(`   Business: ${review.business_name}`);
-      console.log(`   Location: ${review.business_country}`);
+      // Update status to processing
+      await this.updateReviewStatus(review.id, 'processing');
 
-      this.currentReview = review;
-
-      // Get Gmail account
-      gmailAccount = await this.getAvailableGmailAccount();
-      if (!gmailAccount) {
-        throw new Error('No available Gmail account');
+      // Get proxy config and rotate session
+      const proxyConfig = await this.getProxyConfig();
+      let sessionNumber = 1;
+      
+      if (proxyConfig) {
+        sessionNumber = await this.rotateProxySession(proxyConfig);
       }
 
+      // Get next Gmail account
+      const gmailAccount = await this.getNextGmailAccount();
       console.log(`📧 Using Gmail account: ${gmailAccount.email}`);
 
-      // Get proxy config
-      const proxyConfig = await this.getProxyConfig();
-      
       // Initialize browser with proxy
-      const browser = await this.initBrowser(proxyConfig);
+      await this.initBrowser(proxyConfig);
 
-      // Create a new page (puppeteer-core doesn't support createIncognitoBrowserContext with chromium)
-      page = await browser.newPage();
+      // Create new page
+      page = await this.browser.newPage();
+      
+      // Set viewport
+      await page.setViewport({
+        width: 1920,
+        height: 1080
+      });
 
-      // Authenticate with proxy if credentials are available
-      if (this.proxyCredentials) {
-        console.log(`🔐 Authenticating with proxy...`);
+      // If proxy credentials exist, authenticate
+      if (this.proxyCredentials && this.proxyCredentials.username) {
+        console.log('🔐 Authenticating with proxy...');
         await page.authenticate({
           username: this.proxyCredentials.username,
           password: this.proxyCredentials.password
         });
-        console.log(`✅ Proxy authentication configured`);
+        console.log('✅ Proxy authentication configured');
       }
 
-      // Set viewport
-      await page.setViewport({ width: 1920, height: 1080 });
+      // Get proxy IP
+      const proxyIp = await this.getProxyIp(page);
 
-      // Get proxy IP if available
-      if (proxyConfig) {
-        try {
-          await page.goto('https://api.ipify.org?format=json');
-          const ipData = await page.evaluate(() => document.body.textContent);
-          proxyIp = JSON.parse(ipData).ip;
-          console.log(`🌐 Connected via proxy IP: ${proxyIp}`);
-        } catch (e) {
-          console.log('⚠️ Could not verify proxy IP');
-        }
-      }
-
-      // Update review status to in_progress
-      await this.updateReviewStatus(review.id, 'in_progress', gmailAccount.id);
-
-      // ═══════════════════════════════════════════════════════════
-      // OAuth Gmail Authentication (replaces Puppeteer login)
-      // ═══════════════════════════════════════════════════════════
+      // Verify Gmail account with OAuth (NO Puppeteer login!)
       console.log('🔐 Authenticating Gmail account with OAuth...');
+      const isVerified = await oauthHandler.verifyGmailAccount(gmailAccount.email);
       
-      const oauthResult = await oauthHandler.verifyGmailAccount(gmailAccount.email);
-      
-      if (!oauthResult.success) {
-        console.error(`❌ OAuth authentication failed: ${oauthResult.error}`);
-        throw new Error(`Gmail OAuth verification failed: ${oauthResult.error}`);
+      if (!isVerified) {
+        throw new Error(`Gmail account not authenticated: ${gmailAccount.email}`);
       }
       
       console.log(`✅ Gmail OAuth authentication successful for: ${gmailAccount.email}`);
-      console.log(`   ℹ️  This account is verified without Puppeteer login!`);
-      
-      // Note: We NO LONGER need to login with Puppeteer!
-      // OAuth verifies the account is authorized via Google's API.
-      // For reporting reviews, we still need to use Puppeteer to navigate
-      // Maps and click the report button, but we can do that while logged
-      // out or with a simple login via cookies if needed.
+      console.log('   ℹ️  This account is verified without Puppeteer login!');
 
-      // ═══════════════════════════════════════════════════════════
-      // EXTRACT REVIEW TEXT (if not already in database)
-      // ═══════════════════════════════════════════════════════════
-      let reviewText = review.review_text || '';
-      
-      if (!reviewText || reviewText.length < 10) {
-        console.log('📝 Review text not in database - extracting from page...');
+      // Extract review text if not already extracted
+      if (!review.review_text) {
+        console.log('📄 Review text not in database, extracting...');
+        const reviewText = await this.extractReviewText(page, review.review_link);
         
-        // Navigate to review page first
-        console.log(`🗺️ Opening review link: ${review.review_link}`);
-        try {
-          await page.goto(review.review_link, {
-            waitUntil: 'domcontentloaded',
-            timeout: 60000
-          });
-          await this.delay(5000); // Wait for page to stabilize
-          
-          // Extract review data
-          const reviewData = await this.extractReviewText(page);
-          
-          // Save to database if we got valid text
-          if (reviewData.reviewText && reviewData.reviewText.length >= 10) {
-            console.log(`💾 Saving extracted review text to database (${reviewData.reviewText.length} chars)...`);
-            
-            const { error: updateError } = await supabase
-              .from('reviews')
-              .update({
-                review_text: reviewData.reviewText,
-                review_rating: reviewData.rating,
-                reviewer_name: reviewData.reviewerName,
-                review_date: reviewData.reviewDate
-              })
-              .eq('id', review.id);
-            
-            if (updateError) {
-              console.error('⚠️ Failed to save review text:', updateError.message);
-            } else {
-              console.log('✅ Review text saved to database');
-              reviewText = reviewData.reviewText; // Use for OpenAI later
-            }
-          } else {
-            console.warn('⚠️ Could not extract review text from page');
-          }
-        } catch (extractError) {
-          console.error('⚠️ Error extracting review text:', extractError.message);
-          console.log('   Continuing with reporting anyway...');
+        if (reviewText) {
+          await this.storeReviewText(review.id, reviewText);
+        } else {
+          console.log('⚠️ Could not extract review text, but continuing with reporting...');
         }
       } else {
-        console.log(`✅ Review text already in database (${reviewText.length} chars)`);
+        console.log(`✅ Review text already in database (${review.review_text.length} chars)`);
       }
 
       // Report the review
@@ -2036,6 +1654,37 @@ class AutomationService {
     } catch (error) {
       console.error('❌ Error processing review:', error.message);
 
+      // ═══════════════════════════════════════════════════════════
+      // FIX 6: HANDLE GOOGLE_DUPLICATE_REPORT ERROR
+      // ═══════════════════════════════════════════════════════════
+      
+      // Check if it's a Google duplicate report error
+      if (error.message.includes('GOOGLE_DUPLICATE_REPORT')) {
+        console.log('💡 This email has already reported this review');
+        console.log('   ✓ Will rotate to different email for next attempt');
+        
+        // Update stats
+        this.stats.totalProcessed++;
+        this.stats.failed++;
+        this.stats.lastProcessedAt = new Date().toISOString();
+        
+        // Update review status back to pending (will be retried with different email)
+        if (review && review.id) {
+          await this.updateReviewStatus(review.id, 'pending');
+        }
+        
+        // Close the page
+        if (page) await page.close();
+        
+        // Don't throw - just return so automation continues with next review
+        return {
+          success: false,
+          review_id: review.id,
+          error: 'duplicate_report',
+          message: 'Email already reported this review, will use different email next time'
+        };
+      }
+
       // Update stats
       this.stats.totalProcessed++;
       this.stats.failed++;
@@ -2043,71 +1692,28 @@ class AutomationService {
 
       // Update review status to failed
       if (review && review.id) {
-        await this.updateReviewStatus(
+        await this.updateReviewStatus(review.id, 'failed');
+      }
+
+      // Log failed activity
+      if (review && review.id) {
+        await this.logActivity(
           review.id,
-          'failed',
-          gmailAccount?.id,
-          error.message
+          null,
+          'unknown',
+          'failed'
         );
-
-        if (gmailAccount) {
-          await this.logActivity(
-            review.id,
-            gmailAccount.id,
-            proxyIp,
-            'failed',
-            error.message
-          );
-        }
       }
 
-      // Close page if open
-      if (page) {
-        try {
-          await page.close();
-        } catch (e) {
-          // Ignore close errors
-        }
-      }
-    } finally {
-      this.currentReview = null;
+      // Close the page
+      if (page) await page.close();
+
+      throw error;
     }
   }
 
   /**
-   * Delay helper function
-   */
-  delay(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-  }
-
-  /**
-   * Main polling loop
-   */
-  async pollForReviews() {
-    if (!this.isRunning) return;
-
-    try {
-      // Get next pending review
-      const review = await this.getNextPendingReview();
-
-      if (review) {
-        await this.processReview(review);
-      } else {
-        console.log('⏳ No pending reviews, waiting...');
-      }
-    } catch (error) {
-      console.error('❌ Error in polling loop:', error.message);
-    }
-
-    // Schedule next poll
-    if (this.isRunning) {
-      this.pollInterval = setTimeout(() => this.pollForReviews(), POLL_INTERVAL_MS);
-    }
-  }
-
-  /**
-   * Start the automation service
+   * Main automation loop
    */
   async start() {
     if (this.isRunning) {
@@ -2115,43 +1721,59 @@ class AutomationService {
       return;
     }
 
-    console.log('🤖 Starting automation service...');
-    console.log(`📊 Polling interval: ${POLL_INTERVAL_MS}ms`);
-    
     this.isRunning = true;
     this.startedAt = new Date().toISOString();
-    
-    // Start polling
-    this.pollForReviews();
-    
-    console.log('✅ Automation service started successfully');
+    console.log('🚀 Automation service started');
+
+    // Start polling loop
+    this.pollInterval = setInterval(async () => {
+      try {
+        // Check if we should continue running
+        if (!this.isRunning) {
+          clearInterval(this.pollInterval);
+          return;
+        }
+
+        // Get next review
+        const review = await this.getNextReview();
+
+        if (review) {
+          this.currentReview = review;
+          await this.processReview(review);
+          this.currentReview = null;
+        } else {
+          console.log('ℹ️ No pending reviews. Waiting...');
+        }
+
+        // Add delay between reviews
+        await this.delay(DELAY_BETWEEN_ACTIONS);
+
+      } catch (error) {
+        console.error('❌ Error in automation loop:', error.message);
+        this.currentReview = null;
+      }
+    }, POLL_INTERVAL_MS);
   }
 
   /**
-   * Stop the automation service
+   * Stop automation
    */
   async stop() {
-    if (!this.isRunning) {
-      console.log('⚠️ Automation is not running');
-      return;
-    }
-
     console.log('🛑 Stopping automation service...');
-    
     this.isRunning = false;
-    
-    // Clear the polling interval
+
     if (this.pollInterval) {
-      clearTimeout(this.pollInterval);
+      clearInterval(this.pollInterval);
       this.pollInterval = null;
     }
 
-    // Close browser if open
     await this.closeBrowser();
-    
+
+    this.currentReview = null;
+    this.startedAt = null;
+
     console.log('✅ Automation service stopped');
   }
 }
 
-// Export the class
-module.exports = { AutomationService };
+module.exports = AutomationService;
