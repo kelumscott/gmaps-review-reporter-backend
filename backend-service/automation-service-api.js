@@ -983,22 +983,168 @@ class AutomationService {
       
       // Step 8: Click report option
       console.log('🖱️ Step 6: Clicking "Report review" option...');
-      await reportOption.click();
+      
+      // DIAGNOSTIC: Screenshot before click
+      try {
+        await page.screenshot({ path: '/tmp/before-report-click.png', fullPage: false });
+        console.log('   📸 Before click screenshot: /tmp/before-report-click.png');
+      } catch (e) {}
+      
+      // ENHANCED: Try multiple click strategies
+      let clickSuccess = false;
+      
+      // Strategy 1: Regular click
+      try {
+        console.log('   🖱️ Trying: Regular click()...');
+        await reportOption.click();
+        console.log('   ✅ Regular click executed');
+        clickSuccess = true;
+      } catch (e) {
+        console.log('   ⚠️ Regular click failed:', e.message);
+      }
+      
+      // Strategy 2: JavaScript click (if regular click failed)
+      if (!clickSuccess) {
+        try {
+          console.log('   🖱️ Trying: JavaScript click...');
+          await page.evaluate(el => el.click(), reportOption);
+          console.log('   ✅ JavaScript click executed');
+          clickSuccess = true;
+        } catch (e) {
+          console.log('   ⚠️ JavaScript click failed:', e.message);
+        }
+      }
+      
+      // Strategy 3: Dispatch click event
+      if (!clickSuccess) {
+        try {
+          console.log('   🖱️ Trying: Dispatch click event...');
+          await reportOption.evaluate(el => {
+            el.dispatchEvent(new MouseEvent('click', {
+              bubbles: true,
+              cancelable: true,
+              view: window
+            }));
+          });
+          console.log('   ✅ Dispatch click executed');
+          clickSuccess = true;
+        } catch (e) {
+          console.log('   ⚠️ Dispatch click failed:', e.message);
+        }
+      }
+      
+      if (!clickSuccess) {
+        throw new Error('All click strategies failed for "Report review" option');
+      }
+      
+      // DIAGNOSTIC: Wait and screenshot after click
       await this.delay(3000);
+      
+      try {
+        await page.screenshot({ path: '/tmp/after-report-click.png', fullPage: false });
+        console.log('   📸 After click screenshot: /tmp/after-report-click.png');
+      } catch (e) {}
+      
+      // DIAGNOSTIC: Check what's on page after click
+      console.log('   🔍 Checking page state after click...');
+      const pageState = await page.evaluate(() => {
+        const dialogs = document.querySelectorAll('[role="dialog"], [role="alertdialog"]');
+        const captchaElements = document.querySelectorAll('[id*="captcha"], [class*="captcha"], [id*="recaptcha"], iframe[src*="recaptcha"]');
+        const loadingElements = document.querySelectorAll('[aria-busy="true"], [role="progressbar"], .loading, [class*="spinner"]');
+        
+        return {
+          dialogCount: dialogs.length,
+          captchaCount: captchaElements.length,
+          loadingCount: loadingElements.length,
+          url: window.location.href,
+          title: document.title,
+          bodyText: document.body.innerText.substring(0, 500)
+        };
+      });
+      
+      console.log('   📊 Page state:', JSON.stringify(pageState, null, 2));
+      
+      // Check for CAPTCHA
+      if (pageState.captchaCount > 0) {
+        console.log('   🚨 CAPTCHA DETECTED! Need to solve CAPTCHA first');
+        throw new Error('CAPTCHA appeared after clicking Report review - automated reporting blocked');
+      }
+      
+      // Check for loading state
+      if (pageState.loadingCount > 0) {
+        console.log('   ⏳ Page is loading, waiting 5 more seconds...');
+        await this.delay(5000);
+      }
       
       // Step 9: Wait for report dialog
       console.log('⏳ Step 7: Waiting for report dialog...');
+      
+      let dialogFound = false;
+      
       try {
         await page.waitForSelector('[role="dialog"], [role="alertdialog"]', {
           visible: true,
           timeout: 30000  // Increased from 10s to 30s
         });
         console.log('   ✅ Report dialog opened');
+        dialogFound = true;
       } catch (e) {
-        console.log('   ⚠️ Dialog selector timeout (continuing...)');
+        console.log('   ⚠️ Dialog selector timeout after 30s');
       }
       
-      await this.delay(3000);  // Increased from 2s to 3s
+      // DIAGNOSTIC: If dialog not found, do deep investigation
+      if (!dialogFound) {
+        console.log('   🔍 Dialog not found - performing deep investigation...');
+        
+        // Check all possible dialog-like elements
+        const dialogInvestigation = await page.evaluate(() => {
+          const results = {
+            roleDialog: document.querySelectorAll('[role="dialog"]').length,
+            roleAlertDialog: document.querySelectorAll('[role="alertdialog"]').length,
+            ariaModal: document.querySelectorAll('[aria-modal="true"]').length,
+            divDialogs: document.querySelectorAll('div[role="dialog"], div[role="alertdialog"]').length,
+            allDivs: document.querySelectorAll('div').length,
+            recentlyAdded: [],
+            allVisible: []
+          };
+          
+          // Find recently added elements (likely candidates for dialog)
+          const allElements = Array.from(document.querySelectorAll('*'));
+          for (const el of allElements) {
+            const zIndex = window.getComputedStyle(el).zIndex;
+            const position = window.getComputedStyle(el).position;
+            const display = window.getComputedStyle(el).display;
+            
+            if ((zIndex && parseInt(zIndex) > 100) || position === 'fixed' || position === 'absolute') {
+              const text = (el.innerText || '').trim().substring(0, 200);
+              if (text) {
+                results.allVisible.push({
+                  tag: el.tagName,
+                  role: el.getAttribute('role') || 'none',
+                  zIndex: zIndex,
+                  position: position,
+                  display: display,
+                  text: text
+                });
+              }
+            }
+          }
+          
+          return results;
+        });
+        
+        console.log('   📊 Dialog investigation:', JSON.stringify(dialogInvestigation, null, 2));
+        
+        // Screenshot for debugging
+        try {
+          await page.screenshot({ path: '/tmp/dialog-not-found.png', fullPage: true });
+          console.log('   📸 Full page screenshot: /tmp/dialog-not-found.png');
+        } catch (e) {}
+        
+        throw new Error('Report dialog did not appear after clicking "Report review". Check screenshots for details.');
+      }
+      
+      await this.delay(2000);
       
       // Step 10: Select report reason
       console.log(`🎯 Step 8: Selecting report reason: "${reason}"...`);
