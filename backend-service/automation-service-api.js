@@ -998,10 +998,46 @@ class AutomationService {
         console.log('   ⚠️ Dialog selector timeout (continuing...)');
       }
       
-      await this.delay(2000);
+      await this.delay(3000);  // Increased from 2s to 3s
       
       // Step 10: Select report reason
       console.log(`🎯 Step 8: Selecting report reason: "${reason}"...`);
+      
+      // ENHANCED: Wait longer for dialog to appear and stabilize
+      console.log('   ⏳ Waiting for dialog to stabilize (5 more seconds)...');
+      await this.delay(5000);
+      
+      // ENHANCED: Verify dialog exists before proceeding
+      const dialogExists = await page.evaluate(() => {
+        const allDialogs = document.querySelectorAll('[role="dialog"], [role="alertdialog"]');
+        console.log(`   📊 Found ${allDialogs.length} dialogs on page`);
+        return allDialogs.length > 0;
+      });
+      
+      if (!dialogExists) {
+        console.log('   ❌ No dialog found after waiting - taking diagnostic screenshot');
+        try {
+          await page.screenshot({ path: '/tmp/no-dialog-found.png', fullPage: false });
+          console.log('   📸 Screenshot saved: /tmp/no-dialog-found.png');
+        } catch (e) {}
+        
+        // Try one more time with extra wait
+        console.log('   🔄 Attempting recovery: waiting 10 more seconds...');
+        await this.delay(10000);
+        
+        const dialogExistsRetry = await page.evaluate(() => {
+          const allDialogs = document.querySelectorAll('[role="dialog"], [role="alertdialog"]');
+          return allDialogs.length > 0;
+        });
+        
+        if (!dialogExistsRetry) {
+          throw new Error('Report dialog never appeared after clicking "Report review"');
+        }
+        
+        console.log('   ✅ Dialog appeared after extended wait');
+      } else {
+        console.log('   ✅ Dialog confirmed on page');
+      }
       
       let reasonClicked = false;
       
@@ -1010,7 +1046,12 @@ class AutomationService {
         const allDialogs = document.querySelectorAll('[role="dialog"], [role="alertdialog"]');
         let reportDialog = allDialogs.length > 0 ? allDialogs[allDialogs.length - 1] : null;
         
-        if (!reportDialog) return { success: false };
+        if (!reportDialog) {
+          console.log('   ⚠️ No dialog in DOM (this should not happen)');
+          return { success: false };
+        }
+        
+        console.log('   🔍 Searching for reason in dialog...');
         
         const allElements = Array.from(reportDialog.querySelectorAll('*'));
         for (const el of allElements) {
@@ -1043,7 +1084,34 @@ class AutomationService {
       }
       
       if (!reasonClicked) {
-        throw new Error(`Could not select report reason: ${reason}`);
+        // ENHANCED: Show what's actually in the dialog
+        console.log('   ❌ Could not find report reason - showing dialog contents');
+        
+        const dialogContent = await page.evaluate(() => {
+          const allDialogs = document.querySelectorAll('[role="dialog"], [role="alertdialog"]');
+          const reportDialog = allDialogs.length > 0 ? allDialogs[allDialogs.length - 1] : null;
+          
+          if (!reportDialog) return { error: 'No dialog found' };
+          
+          const allText = Array.from(reportDialog.querySelectorAll('*'))
+            .map(el => (el.innerText || el.textContent || '').trim())
+            .filter(text => text.length > 0 && text.length < 200)
+            .slice(0, 30);
+          
+          return {
+            dialogHTML: reportDialog.innerHTML.substring(0, 1000),
+            allText: allText
+          };
+        });
+        
+        console.log('   📋 Dialog contents:', JSON.stringify(dialogContent, null, 2));
+        
+        try {
+          await page.screenshot({ path: '/tmp/reason-not-found.png', fullPage: false });
+          console.log('   📸 Screenshot saved: /tmp/reason-not-found.png');
+        } catch (e) {}
+        
+        throw new Error(`Could not select report reason: ${reason}. Dialog might not have loaded properly or reason text doesn't match.`);
       }
       
       await this.delay(2000);
