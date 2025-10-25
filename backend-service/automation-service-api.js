@@ -1186,8 +1186,8 @@ class AutomationService {
         console.log('   📸 Before click screenshot: /tmp/before-report-click.png');
       } catch (e) {}
       
-      // ENHANCED: Try multiple click strategies
-      let clickSuccess = false;
+      // ENHANCED: Try multiple click strategies for report option
+      let reportClickSuccess = false;
       
       // Strategy 1: JavaScript click (NON-BLOCKING - critical fix!)
       // CRITICAL: Puppeteer's .click() waits for navigation by default
@@ -1197,13 +1197,13 @@ class AutomationService {
         console.log('   🖱️ Trying: JavaScript click (non-blocking)...');
         await page.evaluate(el => el.click(), reportOption);
         console.log('   ✅ JavaScript click executed');
-        clickSuccess = true;
+        reportClickSuccess = true;
       } catch (e) {
         console.log('   ⚠️ JavaScript click failed:', e.message);
       }
       
       // Strategy 2: Dispatch MouseEvent (if JS click failed)
-      if (!clickSuccess) {
+      if (!reportClickSuccess) {
         try {
           console.log('   🖱️ Trying: MouseEvent dispatch...');
           await page.evaluate(el => {
@@ -1212,14 +1212,14 @@ class AutomationService {
             el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
           }, reportOption);
           console.log('   ✅ MouseEvent dispatch executed');
-          clickSuccess = true;
+          reportClickSuccess = true;
         } catch (e) {
           console.log('   ⚠️ MouseEvent dispatch failed:', e.message);
         }
       }
       
       // Strategy 3: Dispatch click event
-      if (!clickSuccess) {
+      if (!reportClickSuccess) {
         try {
           console.log('   🖱️ Trying: Dispatch click event...');
           await reportOption.evaluate(el => {
@@ -1230,13 +1230,13 @@ class AutomationService {
             }));
           });
           console.log('   ✅ Dispatch click executed');
-          clickSuccess = true;
+          reportClickSuccess = true;
         } catch (e) {
           console.log('   ⚠️ Dispatch click failed:', e.message);
         }
       }
       
-      if (!clickSuccess) {
+      if (!reportClickSuccess) {
         throw new Error('All click strategies failed for "Report review" option');
       }
       
