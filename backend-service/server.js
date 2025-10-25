@@ -82,7 +82,23 @@ app.use(cors({
 app.use(express.json());
 
 // Initialize automation service
-const automationService = new AutomationService();
+console.log('🔄 Initializing AutomationService...');
+console.log('   AutomationService type:', typeof AutomationService);
+console.log('   Is constructor:', typeof AutomationService === 'function');
+
+let automationService;
+try {
+  automationService = new AutomationService();
+  console.log('✅ AutomationService initialized successfully');
+  console.log('   Has getStatus:', typeof automationService.getStatus === 'function');
+  console.log('   Has start:', typeof automationService.start === 'function');
+  console.log('   Has stop:', typeof automationService.stop === 'function');
+} catch (error) {
+  console.error('❌ FATAL: Failed to initialize AutomationService');
+  console.error('   Error:', error.message);
+  console.error('   Stack:', error.stack);
+  process.exit(1);
+}
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -198,8 +214,34 @@ app.get('/debug/supabase', async (req, res) => {
 
 // Get automation status
 app.get('/api/status', (req, res) => {
-  const status = automationService.getStatus();
-  res.json(status);
+  try {
+    // Check if automationService exists
+    if (!automationService) {
+      return res.status(500).json({
+        error: 'Automation service not initialized',
+        details: 'automationService is null or undefined'
+      });
+    }
+    
+    // Check if getStatus method exists
+    if (typeof automationService.getStatus !== 'function') {
+      return res.status(500).json({
+        error: 'getStatus method not found',
+        details: 'AutomationService class may not be loaded correctly',
+        availableMethods: Object.keys(automationService)
+      });
+    }
+    
+    const status = automationService.getStatus();
+    res.json(status);
+  } catch (error) {
+    console.error('Error in /api/status:', error);
+    res.status(500).json({
+      error: 'Failed to get automation status',
+      message: error.message,
+      stack: error.stack
+    });
+  }
 });
 
 // Start automation
