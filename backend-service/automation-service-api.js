@@ -102,7 +102,8 @@ class AutomationService {
         args: chromium.args,
         defaultViewport: chromium.defaultViewport,
         executablePath: await chromium.executablePath(),
-        headless: chromium.headless
+        headless: chromium.headless,
+        protocolTimeout: 180000  // 3 minutes for protocol timeout (fixes "Runtime.callFunctionOn timed out")
       };
     } else {
       // Development environment
@@ -110,6 +111,7 @@ class AutomationService {
       
       launchOptions = {
         headless: true,
+        protocolTimeout: 180000,  // 3 minutes for protocol timeout
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
@@ -583,7 +585,7 @@ class AutomationService {
           console.log(`   🔄 Trying: ${strategy.name}`);
           await page.goto(reviewLink, {
             waitUntil: strategy.waitUntil,
-            timeout: 30000
+            timeout: 60000  // Increased from 30s to 60s
           });
           console.log(`   ✅ Success with: ${strategy.name}`);
           navigationSuccess = true;
@@ -989,7 +991,7 @@ class AutomationService {
       try {
         await page.waitForSelector('[role="dialog"], [role="alertdialog"]', {
           visible: true,
-          timeout: 10000
+          timeout: 30000  // Increased from 10s to 30s
         });
         console.log('   ✅ Report dialog opened');
       } catch (e) {
@@ -1115,12 +1117,16 @@ class AutomationService {
 
       // Create new page
       page = await this.browser.newPage();
+      
+      // Set page timeouts (increase from default 30s to 90s)
+      page.setDefaultNavigationTimeout(90000);  // 90 seconds for navigation
+      page.setDefaultTimeout(90000);  // 90 seconds for other operations
 
       // Detect proxy IP
       if (proxyConfig) {
         console.log('🌐 Detecting proxy IP address...');
         try {
-          await page.goto('https://api.ipify.org?format=json', { timeout: 30000 });
+          await page.goto('https://api.ipify.org?format=json', { timeout: 60000 });
           const ipData = await page.evaluate(() => document.body.textContent);
           proxyIp = JSON.parse(ipData).ip;
           console.log(`✅ Connected via proxy IP: ${proxyIp}`);
