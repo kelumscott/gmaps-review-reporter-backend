@@ -1248,35 +1248,44 @@ class AutomationService {
         console.log('   📸 After click screenshot: /tmp/after-report-click.png');
       } catch (e) {}
       
-      // DIAGNOSTIC: Check what's on page after click
+      // DIAGNOSTIC: Check what's on page after click (with timeout protection)
       console.log('   🔍 Checking page state after click...');
-      const pageState = await page.evaluate(() => {
-        const dialogs = document.querySelectorAll('[role="dialog"], [role="alertdialog"]');
-        const captchaElements = document.querySelectorAll('[id*="captcha"], [class*="captcha"], [id*="recaptcha"], iframe[src*="recaptcha"]');
-        const loadingElements = document.querySelectorAll('[aria-busy="true"], [role="progressbar"], .loading, [class*="spinner"]');
+      let pageState = null;
+      try {
+        pageState = await Promise.race([
+          page.evaluate(() => {
+            const dialogs = document.querySelectorAll('[role="dialog"], [role="alertdialog"]');
+            const captchaElements = document.querySelectorAll('[id*="captcha"], [class*="captcha"], [id*="recaptcha"], iframe[src*="recaptcha"]');
+            const loadingElements = document.querySelectorAll('[aria-busy="true"], [role="progressbar"], .loading, [class*="spinner"]');
+            
+            return {
+              dialogCount: dialogs.length,
+              captchaCount: captchaElements.length,
+              loadingCount: loadingElements.length,
+              url: window.location.href,
+              title: document.title,
+              bodyText: document.body.innerText.substring(0, 500)
+            };
+          }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Page state check timeout')), 5000))
+        ]);
         
-        return {
-          dialogCount: dialogs.length,
-          captchaCount: captchaElements.length,
-          loadingCount: loadingElements.length,
-          url: window.location.href,
-          title: document.title,
-          bodyText: document.body.innerText.substring(0, 500)
-        };
-      });
-      
-      console.log('   📊 Page state:', JSON.stringify(pageState, null, 2));
-      
-      // Check for CAPTCHA
-      if (pageState.captchaCount > 0) {
-        console.log('   🚨 CAPTCHA DETECTED! Need to solve CAPTCHA first');
-        throw new Error('CAPTCHA appeared after clicking Report review - automated reporting blocked');
-      }
-      
-      // Check for loading state
-      if (pageState.loadingCount > 0) {
-        console.log('   ⏳ Page is loading, waiting 5 more seconds...');
-        await this.delay(5000);
+        console.log('   📊 Page state:', JSON.stringify(pageState, null, 2));
+        
+        // Check for CAPTCHA
+        if (pageState.captchaCount > 0) {
+          console.log('   🚨 CAPTCHA DETECTED! Need to solve CAPTCHA first');
+          throw new Error('CAPTCHA appeared after clicking Report review - automated reporting blocked');
+        }
+        
+        // Check for loading state
+        if (pageState.loadingCount > 0) {
+          console.log('   ⏳ Page is loading, waiting 5 more seconds...');
+          await this.delay(5000);
+        }
+      } catch (e) {
+        console.log('   ⚠️ Page state check failed or timed out:', e.message);
+        console.log('   ℹ️ Continuing anyway - dialog search will proceed');
       }
       
       // Step 9: Wait for report dialog
