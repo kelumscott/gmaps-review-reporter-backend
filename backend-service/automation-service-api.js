@@ -705,33 +705,141 @@ class AutomationService {
         await this.delay(500);
       }
       
-      // Click button
-      await actualMenuButton.click();
-      console.log('   ✅ Menu button clicked');
-      await this.delay(3000);
+      // ENHANCED: Click button with multiple strategies
+      console.log('   🖱️ Attempting click...');
       
-      // Step 6: Wait for menu to appear
-      console.log('⏳ Step 4: Waiting for menu to appear...');
+      let clickSuccess = false;
+      
+      // Try 1: Regular Puppeteer click
       try {
-        await page.waitForSelector('[role="menu"], [role="listbox"]', {
-          visible: true,
-          timeout: 8000
-        });
-        console.log('   ✅ Menu appeared');
+        await actualMenuButton.click();
+        console.log('   ✅ Regular click executed');
+        clickSuccess = true;
       } catch (e) {
-        console.log('   ⚠️ Menu selector not found (continuing anyway...)');
+        console.log('   ⚠️ Regular click failed:', e.message);
       }
       
+      // Try 2: JavaScript click if regular failed
+      if (!clickSuccess) {
+        try {
+          await page.evaluate(el => el.click(), actualMenuButton);
+          console.log('   ✅ JavaScript click executed');
+          clickSuccess = true;
+        } catch (e) {
+          console.log('   ⚠️ JavaScript click failed:', e.message);
+        }
+      }
+      
+      // Try 3: Focus + Enter key
+      if (!clickSuccess) {
+        try {
+          await actualMenuButton.focus();
+          await page.keyboard.press('Enter');
+          console.log('   ✅ Focus + Enter executed');
+          clickSuccess = true;
+        } catch (e) {
+          console.log('   ⚠️ Focus + Enter failed:', e.message);
+        }
+      }
+      
+      if (!clickSuccess) {
+        throw new Error('All click strategies failed for menu button');
+      }
+      
+      console.log('   ⏳ Waiting for menu to render (3 seconds)...');
       await this.delay(3000);
+      
+      // DIAGNOSTIC: Check what appeared after click
+      console.log('   🔍 Checking page state after menu button click...');
+      const afterClickState = await page.evaluate(() => {
+        const result = {
+          menuElements: {
+            roleMenu: document.querySelectorAll('[role="menu"]').length,
+            roleListbox: document.querySelectorAll('[role="listbox"]').length,
+            roleDialog: document.querySelectorAll('[role="dialog"]').length,
+            anyRole: document.querySelectorAll('[role]').length
+          },
+          recentlyAddedElements: [],
+          highZIndexElements: []
+        };
+        
+        // Find high z-index elements (likely menus/dropdowns)
+        const all = Array.from(document.querySelectorAll('*'));
+        for (const el of all) {
+          const style = window.getComputedStyle(el);
+          const zIndex = parseInt(style.zIndex);
+          
+          if (zIndex > 100 && style.display !== 'none') {
+            const text = (el.innerText || '').trim().substring(0, 200);
+            result.highZIndexElements.push({
+              tag: el.tagName,
+              role: el.getAttribute('role') || 'none',
+              zIndex: zIndex,
+              text: text || '(no text)',
+              ariaLabel: el.getAttribute('aria-label') || 'none'
+            });
+          }
+        }
+        
+        return result;
+      });
+      
+      console.log('   📊 After-click state:', JSON.stringify(afterClickState, null, 2));
+      
+      // Step 6: Wait for menu to appear with ENHANCED detection
+      console.log('⏳ Step 4: Waiting for menu to appear...');
+      
+      let menuFound = false;
+      const menuSelectors = [
+        '[role="menu"]',
+        '[role="listbox"]',
+        '[role="dialog"]',
+        'div[data-is-popup-container="true"]',
+        'div[jsaction*="menu"]',
+        'div[class*="menu"]',
+        'ul[role="menu"]',
+        'ul[role="listbox"]'
+      ];
+      
+      for (const selector of menuSelectors) {
+        try {
+          await page.waitForSelector(selector, { visible: true, timeout: 2000 });
+          console.log(`   ✅ Menu appeared (found with: ${selector})`);
+          menuFound = true;
+          break;
+        } catch (e) {
+          // Try next selector
+        }
+      }
+      
+      if (!menuFound) {
+        console.log('   ⚠️ Menu not detected with standard selectors');
+        console.log('   🔍 Checking for ANY new visible elements...');
+        
+        // Check if ANYTHING appeared
+        const hasNewElements = afterClickState.highZIndexElements.length > 0;
+        if (hasNewElements) {
+          console.log(`   ℹ️ Found ${afterClickState.highZIndexElements.length} high z-index elements (likely menu)`);
+        } else {
+          console.log('   ⚠️ No high z-index elements found - menu may not have appeared!');
+        }
+      }
+      
+      await this.delay(2000);
       
       // Step 7: ENHANCED menu item search with 5 strategies
       console.log('🔍 Step 5: Searching for "Report review" option...');
       
-      // First, debug what's in the menu
+      // ENHANCED: Debug what's in menus AND high z-index elements
       const menuDebug = await page.evaluate(() => {
-        const menus = document.querySelectorAll('[role="menu"], [role="listbox"]');
-        const menuInfo = [];
+        const result = {
+          standardMenus: [],
+          highZIndexAreas: [],
+          allClickableText: []
+        };
         
+        // Check standard menu elements
+        const menus = document.querySelectorAll('[role="menu"], [role="listbox"], [role="dialog"]');
         menus.forEach((menu, idx) => {
           const style = window.getComputedStyle(menu);
           const isVisible = style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
@@ -742,19 +850,65 @@ class AutomationService {
               .map(el => (el.innerText || el.textContent || '').trim())
               .filter(t => t && t.length > 0 && t.length < 100);
             
-            menuInfo.push({
+            result.standardMenus.push({
               index: idx,
-              visible: isVisible,
+              role: menu.getAttribute('role'),
               itemCount: items.length,
-              textItems: textItems.slice(0, 10)
+              textItems: textItems.slice(0, 15)
             });
           }
         });
         
-        return menuInfo;
+        // CRITICAL: Check high z-index elements (Google might not use role="menu")
+        const all = Array.from(document.querySelectorAll('*'));
+        for (const el of all) {
+          const style = window.getComputedStyle(el);
+          const zIndex = parseInt(style.zIndex);
+          
+          if (zIndex > 100 && style.display !== 'none' && (style.position === 'fixed' || style.position === 'absolute')) {
+            const textContent = (el.innerText || '').trim();
+            if (textContent.length > 0 && textContent.length < 500) {
+              result.highZIndexAreas.push({
+                tag: el.tagName,
+                zIndex: zIndex,
+                position: style.position,
+                text: textContent.substring(0, 300),
+                childCount: el.children.length
+              });
+            }
+          }
+        }
+        
+        // Also find ALL clickable elements with "report" text
+        const clickable = document.querySelectorAll('button, a, [role="button"], [role="menuitem"], div[jsaction], span[jsaction]');
+        clickable.forEach(el => {
+          const text = (el.innerText || el.textContent || '').trim().toLowerCase();
+          if (text.includes('report')) {
+            result.allClickableText.push({
+              tag: el.tagName,
+              text: text.substring(0, 100),
+              role: el.getAttribute('role') || 'none'
+            });
+          }
+        });
+        
+        return result;
       });
       
-      console.log('📋 Menu contents:', JSON.stringify(menuDebug, null, 2));
+      console.log('📋 Standard menus found:', menuDebug.standardMenus.length);
+      if (menuDebug.standardMenus.length > 0) {
+        console.log('   ', JSON.stringify(menuDebug.standardMenus, null, 2));
+      }
+      
+      console.log('📋 High z-index areas found:', menuDebug.highZIndexAreas.length);
+      if (menuDebug.highZIndexAreas.length > 0) {
+        console.log('   ', JSON.stringify(menuDebug.highZIndexAreas.slice(0, 3), null, 2));
+      }
+      
+      console.log('📋 Clickable elements with "report" text:', menuDebug.allClickableText.length);
+      if (menuDebug.allClickableText.length > 0) {
+        console.log('   ', JSON.stringify(menuDebug.allClickableText, null, 2));
+      }
       
       let reportOption = null;
       
@@ -912,9 +1066,51 @@ class AutomationService {
         }
       }
       
-      // Strategy 5: Brute force
+      // Strategy 5: Search in high z-index elements (Google's menus)
       if (!reportOption) {
-        console.log('📌 Strategy 5: Brute force all text...');
+        console.log('📌 Strategy 5: Search high z-index elements...');
+        reportOption = await page.evaluateHandle(() => {
+          const all = Array.from(document.querySelectorAll('*'));
+          
+          // First, find high z-index containers
+          for (const el of all) {
+            const style = window.getComputedStyle(el);
+            const zIndex = parseInt(style.zIndex);
+            
+            if (zIndex > 100 && style.display !== 'none') {
+              // Search within this high z-index element for "report"
+              const children = Array.from(el.querySelectorAll('*'));
+              for (const child of children) {
+                const childStyle = window.getComputedStyle(child);
+                if (childStyle.display === 'none' || childStyle.visibility === 'hidden') continue;
+                
+                const text = (child.innerText || child.textContent || '').trim().toLowerCase();
+                if ((text.includes('report') && text.includes('review')) || text === 'report review') {
+                  child.setAttribute('data-report-found', 'true');
+                  return child;
+                }
+              }
+            }
+          }
+          
+          return null;
+        });
+        
+        const isValid = await reportOption.evaluate(el => el !== null);
+        if (isValid) {
+          const markedElement = await page.$('[data-report-found="true"]');
+          if (markedElement) {
+            reportOption = markedElement;
+            console.log('   ✅ SUCCESS with Strategy 5');
+          }
+        } else {
+          reportOption = null;
+        }
+      }
+      
+      // Strategy 6: Brute force all visible text
+      if (!reportOption) {
+        console.log('📌 Strategy 6: Brute force all text...');
         reportOption = await page.evaluateHandle(() => {
           const all = Array.from(document.querySelectorAll('*'));
           
