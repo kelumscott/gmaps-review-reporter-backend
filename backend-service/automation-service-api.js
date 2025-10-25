@@ -993,25 +993,32 @@ class AutomationService {
       // ENHANCED: Try multiple click strategies
       let clickSuccess = false;
       
-      // Strategy 1: Regular click
+      // Strategy 1: JavaScript click (NON-BLOCKING - critical fix!)
+      // CRITICAL: Puppeteer's .click() waits for navigation by default
+      // When clicking opens a dialog (no navigation), it hangs forever
+      // Using page.evaluate with click() doesn't wait for navigation
       try {
-        console.log('   🖱️ Trying: Regular click()...');
-        await reportOption.click();
-        console.log('   ✅ Regular click executed');
+        console.log('   🖱️ Trying: JavaScript click (non-blocking)...');
+        await page.evaluate(el => el.click(), reportOption);
+        console.log('   ✅ JavaScript click executed');
         clickSuccess = true;
       } catch (e) {
-        console.log('   ⚠️ Regular click failed:', e.message);
+        console.log('   ⚠️ JavaScript click failed:', e.message);
       }
       
-      // Strategy 2: JavaScript click (if regular click failed)
+      // Strategy 2: Dispatch MouseEvent (if JS click failed)
       if (!clickSuccess) {
         try {
-          console.log('   🖱️ Trying: JavaScript click...');
-          await page.evaluate(el => el.click(), reportOption);
-          console.log('   ✅ JavaScript click executed');
+          console.log('   🖱️ Trying: MouseEvent dispatch...');
+          await page.evaluate(el => {
+            el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+            el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+            el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+          }, reportOption);
+          console.log('   ✅ MouseEvent dispatch executed');
           clickSuccess = true;
         } catch (e) {
-          console.log('   ⚠️ JavaScript click failed:', e.message);
+          console.log('   ⚠️ MouseEvent dispatch failed:', e.message);
         }
       }
       
