@@ -885,7 +885,7 @@ class AutomationService {
         r.text.toLowerCase().includes('offensive')
       ) || debugResult.reasons[0]; // Fallback to first option
       
-      console.log(`   Selected reason: "${selected Reason.text}"`);
+      console.log(`   Selected reason: "${selectedReason.text}"`);
       
       await page.evaluate((index) => {
         const dialog = document.querySelector('[data-report-dialog="true"]');
