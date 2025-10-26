@@ -694,29 +694,13 @@ class AutomationService {
       await this.delay(3000);
       
       // ═══════════════════════════════════════════════════════════════
-      // OAUTH LOGIN TO GMAIL
+      // GOOGLE ACCOUNT CHECK
       // ═══════════════════════════════════════════════════════════════
-      console.log('🔐 Authenticating with Gmail via OAuth...');
-      
-      const loginResult = await oauthHandler.loginWithOAuth(
-        page,
-        gmailAccount.id,
-        gmailAccount.email
-      );
-      
-      if (!loginResult.success) {
-        throw new Error(`OAuth login failed: ${loginResult.error}`);
-      }
-      
-      console.log('✅ Successfully logged in to Gmail');
-      
-      // Wait for page to stabilize after login
-      await this.delay(3000);
-      
-      // Navigate back to review page after login
-      console.log('🌐 Returning to review page...');
-      await page.goto(review.review_link, { waitUntil: 'networkidle0', timeout: 60000 });
-      await this.delay(3000);
+      // Note: OAuth login in browser is NOT needed for Google Maps reviews
+      // The user must manually login to their Google account ONCE in the browser
+      // The session will be maintained via cookies across automations
+      console.log('ℹ️  Skipping browser OAuth login (not required for Maps reviews)');
+      console.log('   Note: Ensure a Google account is logged in for the first run');
       
       // ═══════════════════════════════════════════════════════════════
       // FIND AND CLICK MENU BUTTON (More/Actions button)
