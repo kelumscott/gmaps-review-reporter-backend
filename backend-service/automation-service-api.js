@@ -878,12 +878,43 @@ class AutomationService {
       // ═══════════════════════════════════════════════════════════════
       console.log('🎯 Selecting report reason...');
       
-      // Find the reason that matches what we want
-      const selectedReason = debugResult.reasons.find(r => 
-        r.text.toLowerCase().includes('fake') || 
-        r.text.toLowerCase().includes('conflict') ||
-        r.text.toLowerCase().includes('offensive')
-      ) || debugResult.reasons[0]; // Fallback to first option
+      // PRIORITY 1: For legal reporting, click "Report a legal issue"
+      let selectedReason = debugResult.reasons.find(r => 
+        r.text.toLowerCase().includes('report a legal issue') ||
+        r.text.toLowerCase().includes('legal issue')
+      );
+      
+      // PRIORITY 2: If not legal reporting or button not found, select appropriate reason
+      if (!selectedReason) {
+        selectedReason = debugResult.reasons.find(r => {
+          const text = r.text.toLowerCase();
+          
+          // Type 2 dialog (Most reviews): Spam, Conflict of interest, Off topic
+          if (text.includes('spam') || 
+              text.includes('conflict of interest') ||
+              text.includes('conflict')) {
+            return true;
+          }
+          
+          // Type 1 dialog (Some reviews): Fake or deceptive
+          if (text.includes('fake') || text.includes('deceptive')) {
+            return true;
+          }
+          
+          // Both types: Off topic / Low quality
+          if (text.includes('off topic') || 
+              text.includes('low quality')) {
+            return true;
+          }
+          
+          return false;
+        });
+      }
+      
+      // FALLBACK: Use first available option
+      if (!selectedReason) {
+        selectedReason = debugResult.reasons[0];
+      }
       
       console.log(`   Selected reason: "${selectedReason.text}"`);
       
