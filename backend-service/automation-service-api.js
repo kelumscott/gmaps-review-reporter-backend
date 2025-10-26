@@ -608,9 +608,8 @@ class AutomationService {
     let page = null;
     
     try {
-      // Open new incognito page
-      const context = await this.browser.createIncognitoBrowserContext();
-      page = await context.newPage();
+      // Create a new page (puppeteer-core doesn't support createIncognitoBrowserContext with chromium)
+      page = await this.browser.newPage();
       
       // Set up proxy authentication if credentials are available
       if (this.proxyCredentials) {
