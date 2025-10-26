@@ -25,9 +25,12 @@ const chromium = require('@sparticuz/chromium');
 const { createClient } = require('@supabase/supabase-js');
 const oauthHandler = require('./oauth-handler');
 
-// Enable stealth plugin
-puppeteerExtra.use(StealthPlugin());
-console.log('🎭 Stealth plugin enabled - enhancing bot detection evasion');
+// Enable stealth plugin with custom configuration to avoid TargetCloseError
+const stealthPlugin = StealthPlugin();
+// Disable user-agent-override evasion which causes TargetCloseError on Render
+stealthPlugin.enabledEvasions.delete('user-agent-override');
+puppeteerExtra.use(stealthPlugin);
+console.log('🎭 Stealth plugin enabled (user-agent-override disabled for stability)');
 console.log('🔐 OAuth handler loaded - Gmail authentication via Google API');
 
 // Load environment variables
@@ -609,7 +612,18 @@ class AutomationService {
     
     try {
       // Create a new page (puppeteer-core doesn't support createIncognitoBrowserContext with chromium)
-      page = await this.browser.newPage();
+      console.log('📄 Creating new browser page...');
+      
+      try {
+        page = await this.browser.newPage();
+        console.log('✅ Page created successfully');
+      } catch (pageError) {
+        console.log('⚠️ Page creation error:', pageError.message);
+        // Try one more time
+        await this.delay(2000);
+        page = await this.browser.newPage();
+        console.log('✅ Page created on retry');
+      }
       
       // Set up proxy authentication if credentials are available
       if (this.proxyCredentials) {
@@ -624,8 +638,57 @@ class AutomationService {
       // Set viewport
       await page.setViewport({ width: 1920, height: 1080 });
       
+      // Navigate with retry logic and more lenient wait strategy
       console.log('🌐 Navigating to Google Maps review...');
-      await page.goto(review.review_link, { waitUntil: 'networkidle0', timeout: 60000 });
+      console.log(`   URL: ${review.review_link}`);
+      
+      let navigationSuccess = false;
+      let lastError = null;
+      
+      // Try multiple navigation strategies
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          console.log(`   Attempt ${attempt}/3...`);
+          
+          // Strategy 1: domcontentloaded (faster, less strict)
+          if (attempt === 1) {
+            await page.goto(review.review_link, { 
+              waitUntil: 'domcontentloaded', 
+              timeout: 45000 
+            });
+          }
+          // Strategy 2: load event
+          else if (attempt === 2) {
+            await page.goto(review.review_link, { 
+              waitUntil: 'load', 
+              timeout: 45000 
+            });
+          }
+          // Strategy 3: networkidle2 (less strict than networkidle0)
+          else {
+            await page.goto(review.review_link, { 
+              waitUntil: 'networkidle2', 
+              timeout: 60000 
+            });
+          }
+          
+          navigationSuccess = true;
+          console.log(`✅ Navigation successful on attempt ${attempt}`);
+          break;
+        } catch (navError) {
+          lastError = navError;
+          console.log(`   ⚠️ Attempt ${attempt} failed: ${navError.message}`);
+          
+          if (attempt < 3) {
+            console.log(`   ⏳ Waiting 3 seconds before retry...`);
+            await this.delay(3000);
+          }
+        }
+      }
+      
+      if (!navigationSuccess) {
+        throw new Error(`Navigation failed after 3 attempts: ${lastError.message}`);
+      }
       
       console.log('⏳ Waiting for page to load...');
       await this.delay(3000);
