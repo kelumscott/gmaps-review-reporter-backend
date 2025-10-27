@@ -756,6 +756,47 @@ class AutomationService {
     try {
       console.log(`🗺️ Opening review link: ${reviewLink}`);
       
+      // ═══════════════════════════════════════════════════════════
+      // SMART URL DETECTION: Direct Report URL vs Review URL
+      // ═══════════════════════════════════════════════════════════
+      // Check if this is a direct report URL (skip menu clicking)
+      // Format: https://www.google.com/local/review/rap/report?postId=...
+      
+      const isDirectReportUrl = reviewLink.includes('/local/review/rap/report');
+      
+      if (isDirectReportUrl) {
+        console.log('✅ DIRECT REPORT URL DETECTED!');
+        console.log('   ⚡ Skipping menu clicking - navigating directly to report page');
+        console.log('   🎯 This is faster and more reliable!');
+        console.log('');
+        
+        // Navigate directly to the report page
+        console.log('🌐 Navigating to report page...');
+        await page.goto(reviewLink, {
+          waitUntil: 'domcontentloaded',
+          timeout: 60000
+        });
+        
+        console.log('   ⏳ Waiting for report page to fully load...');
+        await this.delay(5000); // Wait for page to load
+        console.log('✅ Report page loaded');
+        console.log('');
+        
+        // Skip all the menu button searching and clicking
+        // The report dialog should already be open
+        console.log('🔍 Report form should already be displayed...');
+        console.log('   ⏳ Waiting for report form to fully render...');
+        await this.delay(3000);
+        
+        // Skip to report dialog handling (will continue below after the } else { section)
+        
+      } else {
+        console.log('ℹ️  Review URL detected (not direct report URL)');
+        console.log('   Will navigate to review page and click three-dot menu');
+        console.log('');
+      
+      let targetUrl = reviewLink;
+      
       // Try multiple navigation strategies with retries
       let navigationSuccess = false;
       const strategies = [
@@ -764,10 +805,12 @@ class AutomationService {
         { waitUntil: 'networkidle2', timeout: 90000, name: 'Network Idle' }
       ];
       
+      console.log(`   🎯 Target URL: ${targetUrl.substring(0, 100)}...`);
+      
       for (const strategy of strategies) {
         try {
           console.log(`   🔄 Trying navigation strategy: ${strategy.name} (timeout: ${strategy.timeout}ms)`);
-          await page.goto(reviewLink, {
+          await page.goto(targetUrl, {
             waitUntil: strategy.waitUntil,
             timeout: strategy.timeout
           });
@@ -794,14 +837,18 @@ class AutomationService {
       console.log('🔍 Checking page content...');
       const pageInfo = await page.evaluate(() => {
         const buttons = Array.from(document.querySelectorAll('button'));
+        const url = window.location.href;
+        
         return {
-          url: window.location.href,
+          url: url,
           title: document.title,
           hasButtons: buttons.length,
           hasAriaLabels: document.querySelectorAll('[aria-label]').length,
           // Check if it's REALLY the minimal collapse-only page
           isCollapseOnly: buttons.length === 1 && 
                          buttons[0].innerText?.includes('Collapse side panel'),
+          // Check if it's a review detail page (different structure)
+          isReviewDetailPage: url.includes('/reviews/data=') || url.includes('@1:'),
           firstButtonText: buttons[0]?.innerText?.trim() || ''
         };
       });
@@ -1642,6 +1689,12 @@ class AutomationService {
           reportDialogOpened = true;
         }
       }
+      
+      } // End of else block (regular review URL flow)
+      
+      // ═══════════════════════════════════════════════════════════
+      // COMMON CODE: Report Dialog Handling (for both direct and regular URLs)
+      // ═══════════════════════════════════════════════════════════
       
       console.log('   ⏳ Waiting for report dialog to fully load...');
       await this.delay(2000);
