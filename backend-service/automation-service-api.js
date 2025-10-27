@@ -676,7 +676,7 @@ class AutomationService {
    */
   async loginToGoogleWithOAuth(page, email) {
     try {
-      console.log(`🔐 Logging into Google account in browser: ${email}`);\n      
+      console.log(`🔐 Logging into Google account in browser: ${email}`);      
       // Get OAuth tokens from database
       const { data: tokenData, error: tokenError } = await supabase
         .from('gmail_accounts')
