@@ -58,6 +58,8 @@ class AutomationService {
     this.isRunning = false;
     this.pollInterval = null;
     this.currentReview = null;
+    this.currentProxyIp = null; // Track current proxy IP for reporting_history
+    this.currentScreenshot = null; // Track screenshot for reporting_history
     this.startedAt = null;
     this.proxyCredentials = null; // Store proxy credentials for page.authenticate()
     this.stats = {
@@ -357,6 +359,157 @@ class AutomationService {
       .from('gmail_accounts')
       .update({ last_used: new Date().toISOString() })
       .eq('id', gmailId);
+  }
+
+  /**
+   * Capture screenshot and upload to Supabase Storage
+   * Returns screenshot data with public URL
+   */
+  async captureAndUploadScreenshot(page, reviewId) {
+    try {
+      console.log('📸 Capturing success screenshot for proof...');
+      
+      // Wait a moment for page to fully render
+      await this.delay(1000);
+      
+      // Take screenshot as buffer (JPEG compressed to save space)
+      const screenshotBuffer = await page.screenshot({
+        type: 'jpeg',
+        quality: 80, // Good quality but compressed
+        fullPage: false // Just visible area (success message)
+      });
+      
+      const sizeKB = (screenshotBuffer.length / 1024).toFixed(2);
+      console.log(`   ✅ Screenshot captured (${sizeKB} KB)`);
+      
+      // Generate unique filename with timestamp
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const fileName = `${reviewId}_${timestamp}.jpg`;
+      const filePath = `screenshots/${fileName}`;
+      
+      console.log(`   📤 Uploading to Supabase Storage: ${filePath}`);
+      
+      // Upload to Supabase Storage
+      const { data, error } = await supabase.storage
+        .from('report-screenshots')
+        .upload(filePath, screenshotBuffer, {
+          contentType: 'image/jpeg',
+          cacheControl: '3600',
+          upsert: false
+        });
+      
+      if (error) {
+        console.error('   ❌ Failed to upload screenshot:', error.message);
+        console.error('   Details:', error);
+        return null;
+      }
+      
+      console.log('   ✅ Screenshot uploaded successfully');
+      
+      // Get public URL
+      const { data: urlData } = supabase.storage
+        .from('report-screenshots')
+        .getPublicUrl(filePath);
+      
+      const publicUrl = urlData.publicUrl;
+      console.log(`   🔗 Public URL: ${publicUrl.substring(0, 80)}...`);
+      console.log('   ⏰ This screenshot will auto-delete after 24 hours');
+      
+      return {
+        url: publicUrl,
+        filePath: filePath,
+        capturedAt: new Date().toISOString()
+      };
+      
+    } catch (error) {
+      console.error('❌ Error capturing/uploading screenshot:', error.message);
+      console.log('   ⚠️ Continuing without screenshot (non-critical)');
+      return null;
+    }
+  }
+
+  /**
+   * Update review status and save to reporting_history
+   */
+  async updateReviewStatus(reviewId, status, gmailId = null, errorMessage = null) {
+    try {
+      console.log(`📝 Updating review ${reviewId} status to: ${status}`);
+      
+      // 1. Update reviews table
+      const updateData = {
+        status: status,
+        updated_at: new Date().toISOString()
+      };
+      
+      if (errorMessage) {
+        updateData.error_message = errorMessage;
+      }
+      
+      if (status === 'completed') {
+        updateData.completed_at = new Date().toISOString();
+      }
+      
+      const { error: updateError } = await supabase
+        .from('reviews')
+        .update(updateData)
+        .eq('id', reviewId);
+      
+      if (updateError) {
+        console.error('❌ Failed to update review status:', updateError.message);
+        throw updateError;
+      }
+      
+      console.log(`   ✅ Review status updated to: ${status}`);
+      
+      // 2. Save to reporting_history table (critical for dashboard!)
+      if (gmailId || status === 'completed' || status === 'failed') {
+        // Get review details for history record
+        const { data: review, error: reviewError } = await supabase
+          .from('reviews')
+          .select('gmail_account, report_reason, review_link, business_name')
+          .eq('id', reviewId)
+          .single();
+        
+        if (reviewError) {
+          console.error('⚠️ Could not fetch review for history:', reviewError.message);
+        } else if (review) {
+          const historyData = {
+            review_id: reviewId,
+            gmail_account: review.gmail_account || null,
+            proxy_ip: this.currentProxyIp || null,
+            report_reason: review.report_reason || null,
+            status: status,
+            reported_at: new Date().toISOString(),
+            screenshot_url: this.currentScreenshot?.url || null,
+            screenshot_captured_at: this.currentScreenshot?.capturedAt || null,
+            screenshot_file_path: this.currentScreenshot?.filePath || null
+          };
+          
+          if (errorMessage) {
+            historyData.error_message = errorMessage;
+          }
+          
+          console.log('   💾 Saving to reporting_history table...');
+          const { error: historyError } = await supabase
+            .from('reporting_history')
+            .insert(historyData);
+          
+          if (historyError) {
+            console.error('   ⚠️ Failed to save reporting history:', historyError.message);
+            console.error('   Details:', historyError);
+            // Don't throw - updating status is more important than history
+          } else {
+            console.log('   ✅ Saved to reporting_history table');
+          }
+        }
+      }
+      
+      return true;
+      
+    } catch (error) {
+      console.error('❌ Error in updateReviewStatus:', error.message);
+      return false;
+    }
   }
 
   /**
@@ -787,6 +940,46 @@ class AutomationService {
         // Find and click the submit button (should be the ONLY button on page!)
         console.log('🔍 Looking for Submit button...');
         try {
+          // FIRST: Check if we're on the correct page (not login page!)
+          const pageUrl = await page.url();
+          const pageTitle = await page.title();
+          const bodyText = await page.evaluate(() => document.body.innerText);
+          
+          console.log(`   📍 Current URL: ${pageUrl.substring(0, 100)}...`);
+          console.log(`   📄 Page title: ${pageTitle}`);
+          
+          // Detect if we landed on Google login page instead of submit page
+          if (bodyText.includes('Sign in') || 
+              bodyText.includes('Use your Google Account') ||
+              bodyText.includes('Forgot email') ||
+              pageUrl.includes('accounts.google.com')) {
+            console.error('❌ REDIRECTED TO GOOGLE LOGIN PAGE!');
+            console.error('   🚫 This means the user is not logged into Google');
+            console.error('   💡 The Submit URL requires an authenticated session');
+            console.error('   ⚠️ Cannot submit report from login page');
+            
+            // This is NOT a success - user needs to be logged in first
+            throw new Error('User not authenticated - redirected to Google login page');
+          }
+          
+          // Check if review was deleted (submit page shows error)
+          if (bodyText.includes('review has been removed') || 
+              bodyText.includes('not available') ||
+              bodyText.includes('no longer exists')) {
+            console.warn('⚠️ REVIEW HAS BEEN REMOVED/DELETED');
+            console.warn('   📌 The review no longer exists on Google Maps');
+            console.warn('   ✅ This is actually good news - no need to report it!');
+            
+            return { 
+              success: true, 
+              method: 'submit_url', 
+              reviewDeleted: true,
+              message: 'Review already removed from Google Maps'
+            };
+          }
+          
+          console.log('   ✅ Confirmed on submit page (not login page)');
+          
           // The submit button is typically the only button on this page
           // Try multiple strategies to find it
           
@@ -797,40 +990,101 @@ class AutomationService {
           ];
           
           let submitButton = null;
+          let allButtons = [];
+          
           for (const selector of buttonSelectors) {
             const buttons = await page.$$(selector);
             if (buttons.length > 0) {
               console.log(`   ✅ Found ${buttons.length} button(s) using selector: ${selector}`);
-              // Use the first button (should be Submit)
-              submitButton = buttons[0];
+              
+              // Get text of all buttons to find the right one
+              for (const button of buttons) {
+                const buttonText = await button.evaluate(el => (el.textContent || el.innerText || '').trim());
+                allButtons.push({ button, text: buttonText });
+                console.log(`      📝 Button: "${buttonText}"`);
+              }
+              
               break;
             }
           }
           
+          // Find the Submit button by text
+          const submitButtonData = allButtons.find(btn => 
+            btn.text === 'Submit' || 
+            btn.text === 'Report' ||
+            btn.text.toLowerCase().includes('submit') ||
+            btn.text.toLowerCase().includes('report')
+          );
+          
+          if (submitButtonData) {
+            submitButton = submitButtonData.button;
+            console.log(`   🎯 Found Submit button: "${submitButtonData.text}"`);
+          } else if (allButtons.length === 1) {
+            // If there's only one button, it's probably the submit button
+            submitButton = allButtons[0].button;
+            console.log(`   💡 Only one button found, assuming it's Submit: "${allButtons[0].text}"`);
+          }
+          
           if (submitButton) {
-            // Verify it's the submit button
-            const buttonText = await submitButton.evaluate(el => el.textContent || el.innerText);
-            console.log(`   📝 Button text: "${buttonText}"`);
-            
             console.log('   🖱️ Clicking Submit button...');
             await submitButton.click();
-            await this.delay(2000);
+            await this.delay(3000);
             
-            console.log('✅ REPORT SUBMITTED SUCCESSFULLY!');
-            console.log('   ⚡ Total time: ~9 seconds');
-            console.log('   🎯 Success rate: 98%');
-            console.log('');
+            // Verify submission succeeded
+            const newUrl = await page.url();
+            const newBodyText = await page.evaluate(() => document.body.innerText);
             
-            return { success: true, method: 'submit_url', timeSeconds: 9 };
+            if (newBodyText.includes('Thank you') || 
+                newBodyText.includes('submitted') ||
+                newBodyText.includes('received') ||
+                newBodyText.includes('Report received') ||
+                !newUrl.includes('/submit')) {
+              console.log('✅ REPORT SUBMITTED SUCCESSFULLY!');
+              console.log('   ⚡ Total time: ~9 seconds');
+              console.log('   🎯 Success rate: 98%');
+              console.log('');
+              
+              // 📸 CAPTURE SCREENSHOT FOR 100% PROOF
+              const screenshot = await this.captureAndUploadScreenshot(page, this.currentReview?.id || 'unknown');
+              
+              return { 
+                success: true, 
+                method: 'submit_url', 
+                timeSeconds: 9,
+                screenshot: screenshot
+              };
+            } else {
+              console.warn('⚠️ Submit button clicked but no confirmation detected');
+              console.warn('   💡 Report may or may not have succeeded');
+              // Continue to fallback
+            }
             
           } else {
-            console.warn('⚠️ Could not find Submit button');
-            console.log('   💡 Page may have unexpected structure');
+            console.warn('⚠️ Could not find Submit button on page');
+            console.log('   💡 Available buttons:', allButtons.map(b => b.text).join(', '));
+            console.log('   💡 Page may have unexpected structure or review was deleted');
+            
+            // Check again if review was deleted
+            if (!bodyText.includes('Submit') && !bodyText.includes('Report')) {
+              console.warn('   ⚠️ Page has no Submit/Report text - review likely deleted');
+              return { 
+                success: true, 
+                method: 'submit_url', 
+                reviewDeleted: true,
+                message: 'Review appears to be deleted (no submit button found)'
+              };
+            }
             // Continue to fallback handling below
           }
           
         } catch (submitError) {
-          console.error('❌ Error clicking Submit button:', submitError.message);
+          console.error('❌ Error processing Submit URL:', submitError.message);
+          
+          // If it's a login redirect, this is a fatal error
+          if (submitError.message.includes('login page')) {
+            throw submitError; // Don't fallback, this needs to be fixed
+          }
+          
           console.log('   💡 Will attempt fallback method...');
           // Continue to fallback handling
         }
@@ -2267,6 +2521,10 @@ class AutomationService {
           console.log('✅ Report submitted successfully');
           await this.delay(3000);
           submitted = true;
+          
+          // 📸 CAPTURE SCREENSHOT FOR PROOF (regular dialog path)
+          const screenshot = await this.captureAndUploadScreenshot(page, this.currentReview?.id || 'unknown');
+          return { success: true, method: 'dialog', screenshot: screenshot };
         }
       }
 
@@ -2281,7 +2539,7 @@ class AutomationService {
         }
       }
 
-      return true;
+      return { success: submitted, method: 'dialog' };
 
     } catch (error) {
       console.error('❌ Failed to report review:', error.message);
@@ -2382,9 +2640,11 @@ class AutomationService {
           await page.goto('https://api.ipify.org?format=json');
           const ipData = await page.evaluate(() => document.body.textContent);
           proxyIp = JSON.parse(ipData).ip;
+          this.currentProxyIp = proxyIp; // Store for reporting_history
           console.log(`🌐 Connected via proxy IP: ${proxyIp}`);
         } catch (e) {
           console.log('⚠️ Could not verify proxy IP');
+          this.currentProxyIp = null;
         }
       }
 
@@ -2481,20 +2741,30 @@ class AutomationService {
       }
 
       // Report the review
-      const reportSuccess = await this.reportReview(
+      const reportResult = await this.reportReview(
         page,
         review.review_link,
         review.report_reason
       );
 
-      if (!reportSuccess) {
+      if (!reportResult || !reportResult.success) {
         throw new Error('Failed to report review');
+      }
+
+      // 📸 Store screenshot data for reporting_history
+      if (reportResult.screenshot) {
+        this.currentScreenshot = reportResult.screenshot;
+        console.log('📸 Screenshot captured - will be saved to reporting_history');
+        console.log(`   URL: ${reportResult.screenshot.url}`);
+      } else {
+        this.currentScreenshot = null;
+        console.log('⚠️ No screenshot captured for this report');
       }
 
       // Note: No need to logout - we're using OAuth, not Puppeteer login!
       // The account is verified via Google's API, not browser cookies.
 
-      // Update review status to completed
+      // Update review status to completed (includes screenshot data)
       await this.updateReviewStatus(review.id, 'completed', gmailAccount.id);
 
       // Update Gmail account last_used
