@@ -14,7 +14,8 @@ const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const chromium = require('@sparticuz/chromium');
 const { createClient } = require('@supabase/supabase-js');
 const oauthHandler = require('./oauth-handler');
-
+const oauthHandler = require('./oauth-handler');
+const FingerprintRandomizer = require('./fingerprint-randomizer');
 // Enable stealth plugin
 puppeteerExtra.use(StealthPlugin());
 console.log('🎭 Stealth plugin enabled - enhancing bot detection evasion');
@@ -68,6 +69,10 @@ class AutomationService {
       failed: 0,
       lastProcessedAt: null
     };
+    
+    // Initialize fingerprint randomizer
+    this.fingerprintRandomizer = new FingerprintRandomizer(supabase);
+    console.log('🎭 Fingerprint randomizer initialized');
   }
 
   /**
@@ -89,7 +94,7 @@ class AutomationService {
    * Initialize the browser instance
    * ENHANCED: Better proxy support for Render + Chromium
    */
-  async initBrowser(proxyConfig = null) {
+  async initBrowser(proxyConfig = null, fingerprint = null) {
     if (!this.browser) {
       console.log('🚀 Launching browser...');
       
@@ -313,24 +318,34 @@ class AutomationService {
   /**
    * Get next pending review from the queue
    */
-  async getNextPendingReview() {
+  async getAvailableGmailAccount() {
+    console.log('🔍 Searching for available Gmail account (20-min cooldown)...');
+    
+    // Calculate 20 minutes ago
+    const twentyMinutesAgo = new Date(Date.now() - 20 * 60 * 1000).toISOString();
+    console.log(`   ⏰ Cooldown: Accounts used after ${twentyMinutesAgo} unavailable`);
+    
     const { data, error } = await supabase
-      .from('reviews')
+      .from('gmail_accounts')
       .select('*')
-      .eq('status', 'pending')
-      .order('created_at', { ascending: true })
+      .eq('status', 'active')
+      .or(`last_used.is.null,last_used.lt.${twentyMinutesAgo}`)
+      .order('last_used', { ascending: true, nullsFirst: true })
       .limit(1);
 
     if (error) {
-      console.error('❌ Error fetching reviews:', error.message);
+      console.error('❌ Error fetching Gmail accounts:', error.message);
       return null;
     }
 
     if (!data || data.length === 0) {
+      console.log('⏳ No available accounts (all in 20-min cooldown)');
       return null;
     }
 
-    return data[0];
+    const account = data[0];
+    console.log(`✅ Selected: ${account.email}`);
+    return account;
   }
 
   /**
@@ -2564,6 +2579,9 @@ class AutomationService {
 
       // Get Gmail account
       gmailAccount = await this.getAvailableGmailAccount();
+      // Get fingerprint for this account
+console.log(`🎭 Getting device fingerprint for ${gmailAccount.email}...`);
+const fingerprint = await this.fingerprintRandomizer.getFingerprintForAccount(gmailAccount.email);
       if (!gmailAccount) {
         throw new Error('No available Gmail account');
       }
@@ -2574,7 +2592,7 @@ class AutomationService {
       const proxyConfig = await this.getProxyConfig();
       
       // Initialize browser with proxy
-      const browser = await this.initBrowser(proxyConfig);
+      const browser = await this.initBrowser(proxyConfig, fingerprint);
 
       // ═══════════════════════════════════════════════════════════
       // CREATE PAGE WITH RETRY LOGIC (FIX FOR PROXY CRASHES)
@@ -2586,6 +2604,10 @@ class AutomationService {
         try {
           console.log(`📄 Creating new page (attempt ${4 - retries}/3)...`);
           page = await browser.newPage();
+          // Apply fingerprint if provided
+if (fingerprint) {
+  await this.fingerprintRandomizer.applyToPage(page, fingerprint);
+}
           console.log('✅ Page created successfully');
           pageCreated = true;
         } catch (pageError) {
