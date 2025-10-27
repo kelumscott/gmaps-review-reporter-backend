@@ -109,6 +109,27 @@ app.get('/health', (req, res) => {
   });
 });
 
+// Version check endpoint - tells you which code is deployed
+app.get('/api/version', (req, res) => {
+  res.json({
+    version: '2.0.0-proxy-fix',
+    deployedAt: new Date().toISOString(),
+    features: {
+      proxySupport: true,
+      httpProxy: true,
+      socks5Disabled: true,
+      oauthFixed: true,
+      capsolver: true
+    },
+    message: 'HTTP proxy fix deployed - SOCKS5 replaced with HTTP',
+    buildInfo: {
+      nodeVersion: process.version,
+      platform: process.platform,
+      hasProxyConfig: typeof automationService.getProxyConfig === 'function'
+    }
+  });
+});
+
 // Debug endpoint to check environment variables
 app.get('/debug/env', (req, res) => {
   res.json({
