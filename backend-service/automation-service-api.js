@@ -1399,7 +1399,23 @@ class AutomationService {
       }
 
       // Verify we have a valid element handle
-      console.log('🖱️ Verifying report option element...');\n      const reportOptionInfo = await reportOption.evaluate(el => {\n        return {\n          tagName: el?.tagName || null,\n          innerText: el?.innerText?.substring(0, 50) || null,\n          role: el?.getAttribute('role') || null,\n          isConnected: el?.isConnected || false\n        };\n      });\n      console.log('   Element info:', JSON.stringify(reportOptionInfo, null, 2));\n      \n      if (!reportOptionInfo.isConnected) {\n        throw new Error('Report option element is not connected to DOM');\n      }\n      \n      // Click report option (try multiple methods)\n      console.log('🖱️ Clicking report option...');
+      console.log('🖱️ Verifying report option element...');
+      const reportOptionInfo = await reportOption.evaluate(el => {
+        return {
+          tagName: el?.tagName || null,
+          innerText: el?.innerText?.substring(0, 50) || null,
+          role: el?.getAttribute('role') || null,
+          isConnected: el?.isConnected || false
+        };
+      });
+      console.log('   Element info:', JSON.stringify(reportOptionInfo, null, 2));
+      
+      if (!reportOptionInfo.isConnected) {
+        throw new Error('Report option element is not connected to DOM');
+      }
+      
+      // Click report option (try multiple methods)
+      console.log('🖱️ Clicking report option...');
       
       let reportDialogOpened = false;
       
