@@ -317,7 +317,30 @@ class AutomationService {
   /**
    * Get next pending review from the queue
    */
-  async getAvailableGmailAccount() {
+  async getNextPendingReview() {
+    const { data, error } = await supabase
+      .from('reviews')
+      .select('*')
+      .eq('status', 'pending')
+      .order('created_at', { ascending: true })
+      .limit(1);
+
+    if (error) {
+      console.error('❌ Error fetching reviews:', error.message);
+      return null;
+    }
+
+    if (!data || data.length === 0) {
+      return null;
+    }
+
+    return data[0];
+  }
+
+  /**
+   * Get available Gmail account with 20-min cooldown
+   */
+  async getAvailableGmailAccountWithCooldown() {
     console.log('🔍 Searching for available Gmail account (20-min cooldown)...');
     
     // Calculate 20 minutes ago
@@ -2673,42 +2696,17 @@ if (fingerprint) {
       await this.updateReviewStatus(review.id, 'in_progress', gmailAccount.id);
 
       // ═══════════════════════════════════════════════════════════
-      // OAuth Gmail Authentication (replaces Puppeteer login)
+      // CHROME PROFILE AUTHENTICATION (Pre-logged accounts)
       // ═══════════════════════════════════════════════════════════
-      console.log('🔐 Authenticating Gmail account with OAuth...');
-      
-      const oauthResult = await oauthHandler.verifyGmailAccount(gmailAccount.email);
-      
-      if (!oauthResult.success) {
-        console.error(`❌ OAuth authentication failed: ${oauthResult.error}`);
-        throw new Error(`Gmail OAuth verification failed: ${oauthResult.error}`);
-      }
-      
-      console.log(`✅ Gmail OAuth authentication successful for: ${gmailAccount.email}`);
-      console.log(`   ℹ️  OAuth tokens verified via Gmail API`);
-      
-      // ═══════════════════════════════════════════════════════════
-      // LOGIN TO GOOGLE IN BROWSER (FIX FOR "Unavailable" DIALOG)
-      // ═══════════════════════════════════════════════════════════
-      // The OAuth tokens verify Gmail API access, but we also need
-      // to log into Google in the BROWSER SESSION so that Google Maps
-      // recognizes us as authenticated and allows reporting reviews
-      console.log('🌐 Logging into Google account in browser session...');
-      
-      const browserLoginSuccess = await this.loginToGoogleWithOAuth(page, gmailAccount.email);
-      
-      if (browserLoginSuccess) {
-        console.log('✅ Browser session authenticated with Google account');
-      } else {
-        console.log('⚠️ Browser login uncertain - attempting to continue...');
-        console.log('   💡 If you see "Unavailable" dialog, the account may need manual login');
-      }
-      
-      // Note: We NO LONGER need to login with Puppeteer!
-      // OAuth verifies the account is authorized via Google's API.
-      // For reporting reviews, we still need to use Puppeteer to navigate
-      // Maps and click the report button, but we can do that while logged
-      // out or with a simple login via cookies if needed.
+      // SKIP OAuth verification - accounts are already logged into Chrome profiles
+      // The Browser Agent opens the correct Chrome profile, switches to the
+      // correct Google account from the dropdown menu, then submits the report
+      console.log('🔐 Using pre-logged Chrome profile for Gmail account...');
+      console.log(`   Chrome Profile: ${gmailAccount.chrome_profile_number}`);
+      console.log(`   Account Index: ${gmailAccount.chrome_profile_index}`);
+      console.log(`   Email: ${gmailAccount.email}`);
+      console.log('   ✅ Account already logged into Chrome profile');
+  
 
       // ═══════════════════════════════════════════════════════════
       // EXTRACT REVIEW TEXT (if not already in database)
