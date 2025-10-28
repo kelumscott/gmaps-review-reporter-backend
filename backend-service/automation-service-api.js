@@ -14,7 +14,6 @@ const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const chromium = require('@sparticuz/chromium');
 const { createClient } = require('@supabase/supabase-js');
 const oauthHandler = require('./oauth-handler');
-const oauthHandler = require('./oauth-handler');
 const FingerprintRandomizer = require('./fingerprint-randomizer');
 // Enable stealth plugin
 puppeteerExtra.use(StealthPlugin());
