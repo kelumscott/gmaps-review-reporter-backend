@@ -41,7 +41,32 @@ const supabase = createClient(
   process.env.SUPABASE_ANON_KEY || ''
 );
 
-const AutomationService = require('./automation-service-api');
+// ════════════════════════════════════════════════════════════
+// 🎯 VISUAL MODE: Auto-detect local vs production
+// ════════════════════════════════════════════════════════════
+const IS_LOCAL = !process.env.RENDER && process.env.NODE_ENV !== 'production';
+const fs = require('fs');
+
+// Check if visual mode files exist
+const hasVisualMode = fs.existsSync(__dirname + '/automation-service-api-VISUAL.js');
+
+let AutomationService;
+if (IS_LOCAL && hasVisualMode) {
+  console.log('');
+  console.log('╔════════════════════════════════════════════════════════════╗');
+  console.log('║   🎬 VISUAL MODE ENABLED                                   ║');
+  console.log('╚════════════════════════════════════════════════════════════╝');
+  console.log('');
+  console.log('✨ Running on your Mac/PC!');
+  console.log('✨ Browser will open VISUALLY when you start automation');
+  console.log('✨ You will SEE every action in real-time');
+  console.log('');
+  AutomationService = require('./automation-service-api-VISUAL');
+} else {
+  console.log('🌐 Production mode - using headless browser');
+  AutomationService = require('./automation-service-api');
+}
+
 const oauthHandler = require('./oauth-handler');
 const legalFormHandler = require('./legal-form-handler');
 const openaiHandler = require('./openai-handler');
